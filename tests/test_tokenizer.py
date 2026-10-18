@@ -15,8 +15,8 @@ def main():
     # 结构断言用 raw decode（decode 默认剥 special tokens，对生成输出是对的）
     raw = tb.tok.decode(chat_ids, skip_special_tokens=False)
     assert "<|im_start|>user" in raw and "<|im_end|>" in raw
-    assert "<think>" in raw and "</think>" in raw  # enable_thinking=False 的空 think 块
-    assert raw.endswith("<|im_start|>assistant")
+    # enable_thinking=False：assistant 后面跟空 think 块
+    assert "<|im_start|>assistant" in raw and raw.endswith("<think>\n\n</think>\n\n")
     assert isinstance(tb.eos_ids, set) and len(tb.eos_ids) >= 1
     assert tb.eos_ids == {151643, 151645}  # <|endoftext|> + <|im_end|>
     print("tokenizer OK, eos_ids =", tb.eos_ids)
