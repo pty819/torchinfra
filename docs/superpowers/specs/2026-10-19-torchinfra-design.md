@@ -31,8 +31,9 @@
 | 其他包 | aiter 0.1.20、torchvision |
 | 目标模型 | Qwen3-0.6B bf16（约 1.2GB，Apache-2.0 免授权；结构以 HF config.json 为准：28 层、hidden 1024、16 Q 头 / 8 KV 头、head_dim 128、QK-Norm、SwiGLU、tied embedding、RoPE、词表 151936） |
 
-已知风险（由 P0 解决）：pip 版 ROCm 下 `torch.utils.cpp_extension` 编译需要调通环境变量
-（`HIP_PATH`、`PYTORCH_ROCM_ARCH=gfx1201` 等）。这是第一个里程碑存在的意义。
+已知风险（由 P0 解决）：pip 版 ROCm 下 `torch.utils.cpp_extension` 编译需要调通环境：
+需先执行 `rocm-sdk init` 展开 devel payload（thrust/数学库头文件），loader 内固定
+`PYTORCH_ROCM_ARCH=gfx1201` 并显式传 `--rocm-device-lib-path`。这是第一个里程碑存在的意义。
 
 ## 3. 分阶段设计
 
