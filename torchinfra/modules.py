@@ -84,3 +84,30 @@ class Attention(nn.Module):
         probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
         out = (probs @ vc).transpose(1, 2).reshape(b, s, self.n_heads * self.hd)
         return self.o_proj(out)
+
+
+class MLP(nn.Module):
+    """SwiGLU：down(silu(gate(x)) * up(x))。"""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.gate_proj = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(cfg.hidden_size, cfg.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(cfg.intermediate_size, cfg.hidden_size, bias=False)
+
+    def forward(self, x):
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.self_attn = Attention(cfg)
+        self.mlp = MLP(cfg)
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+
+    def forward(self, x, rope, kv, layer_idx, start_pos):
+        x = x + self.self_attn(self.input_layernorm(x), rope, kv, layer_idx, start_pos)
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x

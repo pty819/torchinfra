@@ -1,0 +1,59 @@
+"""Qwen3 整模型：HF 参数名 + from_pretrained。"""
+from pathlib import Path
+import torch
+import torch.nn as nn
+from torchinfra.config import Qwen3Config
+from torchinfra.modules import RMSNorm, RotaryEmbedding, DecoderLayer
+from torchinfra.kv_cache import KVCache
+from torchinfra.weights import load_weights
+
+
+class Qwen3Model(nn.Module):
+    def __init__(self, cfg: Qwen3Config):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        self.layers = nn.ModuleList(
+            DecoderLayer(cfg) for _ in range(cfg.num_hidden_layers))
+        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+
+    def forward(self, input_ids, rope, kv, start_pos):
+        x = self.embed_tokens(input_ids)
+        for i, layer in enumerate(self.layers):
+            x = layer(x, rope, kv, i, start_pos)
+        return self.norm(x)
+
+
+class Qwen3ForCausalLM(nn.Module):
+    def __init__(self, cfg: Qwen3Config, max_seq: int = 8192):
+        super().__init__()
+        self.cfg = cfg
+        self.max_seq = max_seq
+        self.model = Qwen3Model(cfg)
+        self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
+        self.rope = None  # from_pretrained 里在 dtype cast 之后创建（保 fp32）
+
+    def forward(self, input_ids, kv: KVCache, start_pos: int = 0,
+                logits_to_keep: str = "last"):
+        h = self.model(input_ids, self.rope, kv, start_pos)
+        h = h[:, -1:] if logits_to_keep == "last" else h
+        return self.lm_head(h)
+
+    @classmethod
+    def from_pretrained(cls, model_dir: str | Path, device: str = "cuda",
+                        dtype=torch.bfloat16, max_seq: int = 8192):
+        cfg = Qwen3Config.from_json(model_dir)
+        m = cls(cfg, max_seq=max_seq).to(device=device).to(dtype)
+        # rope 的 cos/sin 必须保 fp32（大位置角对精度敏感），所以在 cast 之后创建
+        m.rope = RotaryEmbedding(cfg.head_dim, max_seq, cfg.rope_theta,
+                                 device=device)
+        sd = load_weights(model_dir, device=device, dtype=dtype)
+        missing, unexpected = m.load_state_dict(sd, strict=False)
+        assert not unexpected, f"多余权重: {unexpected}"
+        # tied 时 checkpoint 可能缺 lm_head（missing 允许）也可能两份都存
+        assert not missing or (cfg.tie_word_embeddings
+                               and set(missing) <= {"lm_head.weight"}), \
+            f"权重缺失: {missing}"
+        if cfg.tie_word_embeddings:
+            m.lm_head.weight = m.model.embed_tokens.weight  # 真正共享存储
+        m.eval()
+        return m
