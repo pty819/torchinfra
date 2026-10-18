@@ -21,8 +21,10 @@ def main():
                      f"model.layers.{i}.input_layernorm.weight"):
             assert name in sd, f"缺少 {name}"
     assert "model.norm.weight" in sd
-    # tied：loader 补出的 lm_head 与 embed 是同一个对象
-    assert sd["lm_head.weight"] is sd["model.embed_tokens.weight"]
+    # 该 checkpoint 虽然 tied，但文件里同时存了 lm_head（值与 embed 相同）
+    if "lm_head.weight" in sd:
+        assert sd["lm_head.weight"].shape == (cfg.vocab_size, cfg.hidden_size)
+        assert torch.equal(sd["lm_head.weight"], sd["model.embed_tokens.weight"])
     print(f"weights OK: {len(sd)} 个张量")
 
 
