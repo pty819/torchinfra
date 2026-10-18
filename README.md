@@ -34,12 +34,23 @@ ninja            # 原始错误直接可见
 
 ```bash
 cd ~/项目/torchinfra
-PYTHONPATH=. ~/rocm10/bin/python tests/test_p0_vector_add.py
+for t in tests/test_*.py; do PYTHONPATH=. ~/rocm10/bin/python $t; done
 ```
+
+## 对话
+
+```bash
+cd ~/项目/torchinfra
+PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
+```
+
+参数：`--max-new/--temperature/--top-p/--seed`。实测 decode 约 14 tok/s（bf16，9070 GRE）。
 
 ## 当前状态
 
 - [x] P0 — torch extension 编译链路调通，`torch.ops.torchinfra.vector_add`（bf16）可用
-- [ ] P1 — 纯 PyTorch 推理引擎（Qwen3-0.6B）
-- [ ] P2 — 自定义算子替换（RMSNorm / softmax / RoPE）
+- [x] P1 — 纯 PyTorch 推理引擎（Qwen3-0.6B）：手写前向与 transformers 对拍
+  top-1 一致率 0.943（bf16）；fp32 greedy 生成 32 token 与 HF **逐 token 一致**；
+  chat CLI 可交互对话（14 tok/s）
+- [ ] P2 — 自定义算子替换（Triton：RMSNorm / softmax / RoPE）
 - [ ] P3 — paged KV cache + continuous batching

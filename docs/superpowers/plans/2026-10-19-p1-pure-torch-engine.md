@@ -50,7 +50,7 @@ tests/
 **Interfaces:**
 - Produces: `@dataclass Qwen3Config`，字段 `vocab_size, hidden_size, intermediate_size, num_hidden_layers, num_attention_heads, num_key_value_heads, head_dim, rms_norm_eps, rope_theta, max_position_embeddings, tie_word_embeddings`；`Qwen3Config.from_json(path_or_dir: str | Path) -> Qwen3Config`（接受模型目录或 config.json 路径）
 
-- [ ] **Step 1: 下载 Qwen3-0.6B（约 1.2GB）**
+- [x] **Step 1: 下载 Qwen3-0.6B（约 1.2GB）**
 
 ```bash
 ~/rocm10/bin/python - <<'EOF'
@@ -63,7 +63,7 @@ EOF
 
 验证：`ls ~/models/Qwen3-0.6B` 含 `config.json` 与 `model.safetensors`。
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```python
 # tests/test_config.py
@@ -88,12 +88,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_config.py`
 Expected: `ModuleNotFoundError: No module named 'torchinfra.config'`
 
-- [ ] **Step 4: 实现 config.py**
+- [x] **Step 4: 实现 config.py**
 
 ```python
 # torchinfra/config.py
@@ -138,7 +138,7 @@ class Qwen3Config:
         )
 ```
 
-- [ ] **Step 5: 跑测试通过 + commit**
+- [x] **Step 5: 跑测试通过 + commit**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_config.py` → `config OK: ...`
 
@@ -159,7 +159,7 @@ git commit -m "P1: 模型下载与 Qwen3Config 解析"
 - Consumes: `Qwen3Config`（Task 1）
 - Produces: `load_weights(model_dir: str | Path, device: str = "cuda", dtype = torch.bfloat16) -> dict[str, torch.Tensor]`；tied 模型缺 `lm_head.weight` 时自动补别名（与 embed 同一 tensor 对象）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_weights.py
@@ -192,12 +192,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_weights.py`
 Expected: `ModuleNotFoundError: No module named 'torchinfra.weights'`
 
-- [ ] **Step 3: 实现 weights.py**
+- [x] **Step 3: 实现 weights.py**
 
 ```python
 # torchinfra/weights.py
@@ -223,7 +223,7 @@ def load_weights(model_dir: str | Path, device: str = "cuda",
     return sd
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_weights.py` → `weights OK: ...`
 
@@ -243,7 +243,7 @@ git commit -m "P1: safetensors 权重加载（含 tied lm_head 补齐）"
 **Interfaces:**
 - Produces: `class RMSNorm(nn.Module)`：`__init__(dim: int, eps: float = 1e-6)`，参数名 `weight`；forward 输入输出同 shape 同 dtype，内部 fp32 计算
 
-- [ ] **Step 1: 写失败测试（测试内自带 fp32 独立参考实现）**
+- [x] **Step 1: 写失败测试（测试内自带 fp32 独立参考实现）**
 
 ```python
 # tests/test_modules.py — 本文件随任务追加
@@ -275,12 +275,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py`
 Expected: `ImportError: cannot import name 'RMSNorm'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # torchinfra/modules.py
@@ -303,7 +303,7 @@ class RMSNorm(nn.Module):
         return (self.weight.float() * x32).to(dtype)
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py   # → RMSNorm OK
@@ -322,7 +322,7 @@ git commit -m "P1: RMSNorm"
 **Interfaces:**
 - Produces: `rotate_half(x: Tensor) -> Tensor`；`class RotaryEmbedding(nn.Module)`：`__init__(head_dim, max_pos, theta, device)` 建 fp32 buffer `cos/sin [max_pos, head_dim]`；`apply_qk(q, k, start: int) -> (q, k)`，q/k 形状 `[b, heads, seq, head_dim]`，返回原地语义的旋转结果（half-split 布局，与 HF Qwen3 一致）
 
-- [ ] **Step 1: 追加失败测试（手推 d=4 解析解做参考）**
+- [x] **Step 1: 追加失败测试（手推 d=4 解析解做参考）**
 
 ```python
 # 追加到 tests/test_modules.py
@@ -360,12 +360,12 @@ def test_rope():
 
 并把 `main()` 改为 `test_rms_norm(); test_rope()`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py`
 Expected: `ImportError: cannot import name 'RotaryEmbedding'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # 追加到 torchinfra/modules.py
@@ -397,7 +397,7 @@ class RotaryEmbedding(nn.Module):
 
 （实现时删掉标注 placeholder 的那行，保留 `freqs` 两行。）
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py   # → RMSNorm OK / RoPE OK
@@ -416,7 +416,7 @@ git commit -m "P1: RoPE（half-split 布局 + 解析解对拍）"
 **Interfaces:**
 - Produces: `class KVCache`：`__init__(n_layers, max_seq, n_kv_heads, head_dim, dtype, device)`；`append(layer_idx, k, v, start)`（k/v 形状 `[1, n_kv, s, head_dim]`）；`read(layer_idx, upto) -> (k, v)`（`[1, n_kv, upto, head_dim]` 视图）；存储布局 `[n_layers, max_seq, n_kv, head_dim]`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_kv_cache.py
@@ -450,12 +450,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_kv_cache.py`
 Expected: `ModuleNotFoundError: No module named 'torchinfra.kv_cache'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # torchinfra/kv_cache.py
@@ -483,7 +483,7 @@ class KVCache:
         return k, v
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_kv_cache.py
@@ -503,7 +503,7 @@ git commit -m "P1: contiguous KV cache"
 - Consumes: `RMSNorm`、`RotaryEmbedding.apply_qk`、`KVCache.append/read`（签名见前）
 - Produces: `class Attention(nn.Module)`：`__init__(cfg: Qwen3Config)`，子模块名 `q_proj/k_proj/v_proj/o_proj/q_norm/k_norm`（都是无 bias Linear / RMSNorm）；`forward(hidden: [b,s,hidden], rope, kv: KVCache, layer_idx: int, start_pos: int) -> [b,s,hidden]`。decode（s==1）不做 causal mask。
 
-- [ ] **Step 1: 追加失败测试（两用例：无参考实现对照 + 分块等价）**
+- [x] **Step 1: 追加失败测试（两用例：无参考实现对照 + 分块等价）**
 
 ```python
 # 追加到 tests/test_modules.py
@@ -560,12 +560,12 @@ def test_attention():
 
 把 `test_attention()` 加入 `main()`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py`
 Expected: `ImportError: cannot import name 'Attention'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```python
 # 追加到 torchinfra/modules.py
@@ -608,7 +608,7 @@ class Attention(nn.Module):
         return self.o_proj(out)
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_modules.py
@@ -630,7 +630,7 @@ git commit -m "P1: GQA attention（QK-Norm + causal + cache 读写）"
 - Consumes: Task 3-6 全部；`load_weights`（Task 2）
 - Produces: `class MLP`（gate/up/down，SiLU 门控）；`class DecoderLayer`（input_layernorm → attn → 残差 → post_attention_layernorm → mlp → 残差）；`class Qwen3Model`（embed_tokens/layers/norm）；`class Qwen3ForCausalLM`：`__init__(cfg, max_seq=8192)`，`forward(input_ids, kv, start_pos, logits_to_keep: "last"|"all") -> logits [b, s 或 1, vocab]`，类方法 `from_pretrained(model_dir, device="cuda", dtype=torch.bfloat16, max_seq=8192)`；属性 `cfg`、`max_seq`、`rope`
 
-- [ ] **Step 1: 写共享参考工具 tests/_ref.py**
+- [x] **Step 1: 写共享参考工具 tests/_ref.py**
 
 ```python
 # tests/_ref.py
@@ -655,7 +655,7 @@ def hf_tokenizer():
     return AutoTokenizer.from_pretrained(MODEL_DIR)
 ```
 
-- [ ] **Step 2: 写失败测试 tests/test_model.py**
+- [x] **Step 2: 写失败测试 tests/test_model.py**
 
 ```python
 # tests/test_model.py
@@ -699,12 +699,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 Run: `PYTHONPATH=. ~/rocm10/bin/python tests/test_model.py`
 Expected: `ModuleNotFoundError: No module named 'torchinfra.model'`
 
-- [ ] **Step 4: 实现 MLP / DecoderLayer（追加到 modules.py）**
+- [x] **Step 4: 实现 MLP / DecoderLayer（追加到 modules.py）**
 
 ```python
 # 追加到 torchinfra/modules.py
@@ -733,7 +733,7 @@ class DecoderLayer(nn.Module):
         return x
 ```
 
-- [ ] **Step 5: 实现 model.py**
+- [x] **Step 5: 实现 model.py**
 
 ```python
 # torchinfra/model.py
@@ -798,7 +798,7 @@ class Qwen3ForCausalLM(nn.Module):
         return m
 ```
 
-- [ ] **Step 6: 跑测试通过（这是最容易暴露 bug 的环节，备好排查路径）+ commit**
+- [x] **Step 6: 跑测试通过（这是最容易暴露 bug 的环节，备好排查路径）+ commit**
 
 若 top-1 一致率低，按序排查：causal mask off-by-one → RoPE 布局（half vs interleaved）→ QK-Norm 位置（projection 之后、RoPE 之前）→ 缓存写入的 permute。
 
@@ -819,7 +819,7 @@ git commit -m "P1: MLP/DecoderLayer/整模型 + HF logits 对拍"
 **Interfaces:**
 - Produces: `class TokenizerBox`：`__init__(model_dir)`；`encode(text) -> list[int]`；`decode(ids: list[int]) -> str`；`apply_chat(messages: list[dict], add_generation_prompt=True) -> list[int]`（`enable_thinking=False`；若模板不支持该参数则去掉重试）；`eos_ids: set[int]`（取 `eos_token_id` ∪ `generation_config` 里的值）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_tokenizer.py
@@ -845,7 +845,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/tokenizer.py
@@ -886,7 +886,7 @@ class TokenizerBox:
                 tokenize=True)
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_tokenizer.py
@@ -905,7 +905,7 @@ git commit -m "P1: tokenizer 封装（chat 模板关 thinking）"
 **Interfaces:**
 - Produces: `sample_token(logits: Tensor[vocab] fp, temperature=0.0, top_k=0, top_p=0.0, generator: torch.Generator | None = None) -> int`；`temperature <= 0` 时 greedy；top_k/top_p 用 HF 风格截断（`cumsum - prob <= top_p`，保证至少留 1 个）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_sampling.py
@@ -945,7 +945,7 @@ if __name__ == "__main__":
 
 （注：具体支撑集断言以 softmax 实际值微调，先跑一遍打印 `torch.softmax` 确认再定死断言。）
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/sampling.py
@@ -973,7 +973,7 @@ def sample_token(logits: torch.Tensor, temperature: float = 0.0,
     return int(torch.multinomial(probs, 1, generator=generator))
 ```
 
-- [ ] **Step 4: 跑测试通过 + commit**
+- [x] **Step 4: 跑测试通过 + commit**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_sampling.py
@@ -994,7 +994,7 @@ git commit -m "P1: 采样器（greedy/temp/top-k/top-p）"
 - Consumes: 全部前序
 - Produces: `generate(model, tok: TokenizerBox, prompt_ids, max_new_tokens=128, temperature=0.0, top_k=0, top_p=0.0, seed=None) -> Iterator[tuple[int, str]]`（流式 yield `(token_id, 增量文本)`，遇 EOS 停）；`chat.py` 的 `main()`（argparse：`--model`、`--max-new`、`--temperature`、`--top-p`、`--seed`）
 
-- [ ] **Step 1: 写终局验收测试（P1 金标准：fp32 双侧 greedy 逐 token 一致）**
+- [x] **Step 1: 写终局验收测试（P1 金标准：fp32 双侧 greedy 逐 token 一致）**
 
 ```python
 # tests/test_p1_acceptance.py
@@ -1030,7 +1030,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败（No module named generate）→ Step 3: 实现 generate.py**
+- [x] **Step 2: 确认失败（No module named generate）→ Step 3: 实现 generate.py**
 
 ```python
 # torchinfra/generate.py
@@ -1073,7 +1073,7 @@ def generate(model, tok, prompt_ids: list[int], max_new_tokens: int = 128,
         pos += 1
 ```
 
-- [ ] **Step 4: 实现 chat.py**
+- [x] **Step 4: 实现 chat.py**
 
 ```python
 # torchinfra/chat.py
@@ -1137,7 +1137,7 @@ if __name__ == "__main__":
 
 **说明（实现时执行）**：上面多轮历史处理是刻意标注的简化，实现时改为——在 generate 外记录本轮流式生成的 ids（把 `generate` 的 yield 累积成 `turn_ids`），`messages.append({"role": "assistant", "content": tok.decode(turn_ids)})`，删掉那行占位的三元表达式。
 
-- [ ] **Step 5: 跑终局验收**
+- [x] **Step 5: 跑终局验收**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python tests/test_p1_acceptance.py
@@ -1145,7 +1145,7 @@ PYTHONPATH=. ~/rocm10/bin/python tests/test_p1_acceptance.py
 
 Expected: `acceptance OK: 32 tokens 逐 token 一致`。若 bf16/fp32 有分歧：两侧都已 fp32，分歧只可能来自实现 bug（对照 Task 7 的排查清单）或 HF generate 的 eos/pad 细节（检查 `out[0, len(ids):]` 长度是否恰为 N）。
 
-- [ ] **Step 6: 手动验收 chat（记录 tokens/s 到 README）**
+- [x] **Step 6: 手动验收 chat（记录 tokens/s 到 README）**
 
 ```bash
 PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat
@@ -1153,7 +1153,7 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat
 
 问一句"用三句话介绍一下你自己"，记录输出与 tok/s；README 的 P1 勾选框打勾并附数字。
 
-- [ ] **Step 7: 全量测试回归 + commit**
+- [x] **Step 7: 全量测试回归 + commit**
 
 ```bash
 for t in tests/test_config.py tests/test_weights.py tests/test_modules.py \

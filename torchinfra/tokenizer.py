@@ -26,10 +26,18 @@ class TokenizerBox:
     def apply_chat(self, messages: list[dict],
                    add_generation_prompt: bool = True) -> list[int]:
         try:
-            return self.tok.apply_chat_template(
+            out = self.tok.apply_chat_template(
                 messages, add_generation_prompt=add_generation_prompt,
                 tokenize=True, enable_thinking=False)
         except TypeError:  # 模板不支持 enable_thinking
-            return self.tok.apply_chat_template(
+            out = self.tok.apply_chat_template(
                 messages, add_generation_prompt=add_generation_prompt,
                 tokenize=True)
+        # transformers 各版本返回类型不一：str / list[int] / BatchEncoding
+        if isinstance(out, str):
+            out = self.encode(out)
+        if hasattr(out, "keys"):
+            out = out["input_ids"]
+        if out and isinstance(out[0], list):  # batched
+            out = out[0]
+        return list(out)
