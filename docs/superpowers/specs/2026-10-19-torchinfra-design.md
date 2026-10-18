@@ -11,7 +11,8 @@
 学习目标按优先级：
 
 1. LLM 推理引擎核心机制：模型前向、KV cache、prefill/decode 两阶段、采样
-2. 自定义算子完整链路：HIP kernel → torch extension → `torch.ops` 调用 → 与原生算子对拍
+2. 自定义算子完整链路（Triton 为主）：kernel 编写 → 与原生算子对拍 → autotune；
+   HIP C++ / torch extension 链路已在 P0 打通，作为"底层透视"保留
 3. （进阶）vLLM/SGLang 的核心：paged KV cache 与 continuous batching
 
 首要目的是学习原理，不追求性能超越现有引擎，不追求产品化。
@@ -63,24 +64,30 @@
 2. 固定 prompt + greedy 下，生成结果与 transformers **逐 token 一致**
 3. 可交互对话
 
-### P2 — 自定义算子替换
+### P2 — 自定义算子替换（Triton）
 
-把 P1 引擎中的算子逐个换成手写 HIP kernel（走 P0 链路）：
+把 P1 引擎中的算子逐个换成 Triton kernel（triton 3.8.0 已在 gfx1201 上验证：
+vector_add 与 tl.dot 均可用）：
 
-1. RMSNorm → 自定义 kernel，与 `torch.rms_norm` 对拍 + benchmark
-2. softmax（last dim）、RoPE、elementwise add/mul 同流程
-3. 每个算子固定节奏：naive 版正确 → 对拍 → `torch.utils.benchmark` 测差距 →
-   尝试一种优化（合并访问 / 向量化 / 减少 bank conflict）→ 复测
+1. RMSNorm → Triton kernel，与 `torch.rms_norm` 对拍 + `triton.autotune` 调 block 尺寸
+2. softmax（last dim）、RoPE、elementwise 同流程
+3. 每个算子固定节奏：正确版 → 对拍 → autotune / 手动调参观察性能 → 记录
+4. 至少一个 fused 算子体验 Triton 的核心价值（如 RMSNorm+residual 融合，
+   省一次显存往返）
 
-**验收**：至少 3 个算子完成"对拍一致 + 性能对比记录"；读懂一个 vLLM/SGLang
-`csrc/` 中的真实 kernel（CUDA 或 HIP 版均可）并写一份阅读笔记（形式不限）。
+P0 的 HIP C++ 编译链路保留为"底层透视"参考——Triton 藏掉的东西（launch 配置、
+bf16 布局、工具链）都已在 P0 亲手见过；后续不再深入 HIP，除非作为选修。
+
+**验收**：至少 3 个 Triton 算子完成"对拍一致 + autotune 性能记录"；至少 1 个
+fused 算子相对未融合组合有可测得的收益；读懂一个 vLLM/SGLang 的真实 Triton
+kernel 并写阅读笔记（形式不限）。
 
 ### P3 — paged KV cache 与 continuous batching（进阶）
 
 P1/P2 完成后再启动：
 
 - paged KV cache 管理器：block table、槽位分配/释放、复用
-- 手写 paged attention kernel（先 decode 路径，prefill 后续）
+- Triton paged attention kernel（先 decode 路径，prefill 后续）
 - continuous batching 调度循环：多请求并发 prefill/decode 混跑
 
 **验收**：并发请求的输出与串行逐请求一致；吞吐相对 naive batching 有可测得的提升。
@@ -89,8 +96,8 @@ P1/P2 完成后再启动：
 
 | 类别 | 内容 |
 |---|---|
-| 借 | torch 全家（含 matmul/SDPA）、safetensors、HF tokenizers、`torch.utils.cpp_extension` |
-| 手写 | 模型前向、KV cache、采样、生成循环、调度（P3）、全部自定义 kernel（P2/P3） |
+| 借 | torch 全家（含 matmul/SDPA）、triton 及其 AMD 后端、safetensors、HF tokenizers |
+| 手写 | 模型前向、KV cache、采样、生成循环、调度（P3）、全部自定义 kernel（P2/P3，Triton 为主；HIP 仅 P0 的 vector_add） |
 | 不碰 | 训练/autograd、量化（awq/gguf/mxfp4）、GGUF 格式、分布式 |
 
 ## 5. 验证与错误处理
