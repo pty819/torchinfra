@@ -43,3 +43,44 @@ class RotaryEmbedding(nn.Module):
         cos = self.cos[pos].to(q.dtype)[None, None]
         sin = self.sin[pos].to(q.dtype)[None, None]
         return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
+
+
+class Attention(nn.Module):
+    """GQA + QK-Norm + causal；q/k norm 在 projection 后、RoPE 前。"""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.n_heads = cfg.num_attention_heads
+        self.n_kv = cfg.num_key_value_heads
+        self.hd = cfg.head_dim
+        self.scale = self.hd ** -0.5
+        self.q_proj = nn.Linear(cfg.hidden_size, self.n_heads * self.hd, bias=False)
+        self.k_proj = nn.Linear(cfg.hidden_size, self.n_kv * self.hd, bias=False)
+        self.v_proj = nn.Linear(cfg.hidden_size, self.n_kv * self.hd, bias=False)
+        self.o_proj = nn.Linear(self.n_heads * self.hd, cfg.hidden_size, bias=False)
+        self.q_norm = RMSNorm(self.hd, cfg.rms_norm_eps)
+        self.k_norm = RMSNorm(self.hd, cfg.rms_norm_eps)
+
+    def forward(self, hidden, rope, kv, layer_idx, start_pos):
+        b, s, _ = hidden.shape
+        q = self.q_proj(hidden).view(b, s, self.n_heads, self.hd).transpose(1, 2)
+        k = self.k_proj(hidden).view(b, s, self.n_kv, self.hd).transpose(1, 2)
+        v = self.v_proj(hidden).view(b, s, self.n_kv, self.hd).transpose(1, 2)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        q, k = rope.apply_qk(q, k, start_pos)
+        kv.append(layer_idx, k, v, start_pos)
+        cur = start_pos + s
+        kc, vc = kv.read(layer_idx, cur)
+        kc = kc.repeat_interleave(self.n_heads // self.n_kv, dim=1)
+        vc = vc.repeat_interleave(self.n_heads // self.n_kv, dim=1)
+        scores = (q @ kc.transpose(-1, -2)) * self.scale
+        if s > 1:  # causal mask；decode 单 token 不需要
+            qpos = torch.arange(start_pos, cur, device=q.device)
+            kpos = torch.arange(cur, device=q.device)
+            scores = scores.masked_fill(
+                kpos[None, None, None, :] > qpos[None, None, :, None],
+                float("-inf"))
+        probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
+        out = (probs @ vc).transpose(1, 2).reshape(b, s, self.n_heads * self.hd)
+        return self.o_proj(out)
