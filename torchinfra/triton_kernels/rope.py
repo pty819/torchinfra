@@ -31,6 +31,5 @@ class TritonRoPE(RotaryEmbedding):
         for x, s_len in ((q, q.shape[2]), (k, k.shape[2])):
             rows = x.numel() // d
             _rope_inplace_kernel[(rows,)](
-                x, self.cos, self.sin, s_len, d, d // 2, x.stride(2),
-                HALF=d // 2)
+                x, self.cos, self.sin, s_len, d, d // 2, x.stride(2))
         return q, k
