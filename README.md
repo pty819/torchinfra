@@ -80,6 +80,3 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   结构的由来之一（规避循环内地址计算）。
 - [ ] P3 — paged KV cache + continuous batching
 
-## 对话
-
-- [x] chat CLI（多轮）：`PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat`
