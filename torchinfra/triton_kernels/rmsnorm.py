@@ -47,3 +47,38 @@ class TritonRMSNorm(nn.Module):
         _rmsnorm_kernel[grid](x2, self.weight, out, out.stride(0), n,
                               self.eps)
         return out.view(shape)
+
+
+@triton.jit
+def _fused_kernel(x_ptr, dx_ptr, w_ptr, res_ptr, norm_ptr, stride, N, eps,
+                  BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    base = row * stride
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+    dx = tl.load(dx_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+    r = (x + dx).to(res_ptr.dtype.element_ty)   # 对齐 torch：residual 先落 dtype
+    r32 = r.to(tl.float32)                      # norm 读回的就是舍入后的值
+    rms = tl.rsqrt(tl.sum(r32 * r32, 0) / N + eps)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    tl.store(res_ptr + base + offs, r, mask=mask)
+    tl.store(norm_ptr + base + offs, (r32 * rms * w).to(norm_ptr.dtype.element_ty),
+             mask=mask)
+
+
+def fused_rmsnorm_residual(x: torch.Tensor, dx: torch.Tensor,
+                           w: torch.Tensor, eps: float = 1e-6):
+    """residual=(x+dx) 落 dtype；normed=rmsnorm(residual)*w。一趟读写。"""
+    x, dx = x.contiguous(), dx.contiguous()
+    shape = x.shape
+    n = shape[-1]
+    res = torch.empty_like(x)
+    normed = torch.empty_like(x)
+    x2, dx2 = x.view(-1, n), dx.view(-1, n)
+    r2, n2 = res.view(-1, n), normed.view(-1, n)
+    rows = x2.shape[0]
+    block = max(triton.next_power_of_2(n), 16)
+    _fused_kernel[(rows,)](x2, dx2, w, r2, n2, x2.stride(0), n, eps,
+                           BLOCK=block)
+    return res, normed
