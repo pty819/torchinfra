@@ -80,8 +80,10 @@ class PagedKVCache:
 
     def append(self, req_id: int, layer_idx: int, k: torch.Tensor,
                v: torch.Tensor, start: int) -> None:
-        """k/v [1, n_kv, s, hd]；start 为该请求已有 token 数。"""
+        """k/v [1, n_kv, s, hd]；start 为该请求已有 token 数（须等于 kv_lens）。
+        自动补块：跨块增长是常态（decode 每步 1 token）。"""
         s = k.shape[2]
+        self.extend(req_id, s)
         # 教学版逐 token 写入；按段拷贝的优化版留给进阶
         for t in range(s):
             blk, off = self._locate(req_id, start + t)
