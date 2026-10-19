@@ -174,11 +174,12 @@ def _paged_decode_loop(
 def paged_decode_attention_tensors(q: torch.Tensor, k_full: torch.Tensor,
                                    v_full: torch.Tensor, block_table: torch.Tensor,
                                    kv_lens: torch.Tensor, layer_idx: int,
-                                   block_size: int) -> torch.Tensor:
+                                   block_size: int, num_warps: int = 2
+                                   ) -> torch.Tensor:
     """张量直通入口（CUDA Graph 路径用，无 view/fancy-index）。
 
     q [B, n_heads, 1, D]；k/v_full [n_layers, blocks, n_kv, bs, D]；
-    返回 [B, n_heads, D]。
+    返回 [B, n_heads, D]。num_warps 默认 2（实测 B=8/32 均优于 4，见 bench）。
     """
     B, H, _, D = q.shape
     k_cache = k_full[layer_idx]
@@ -194,7 +195,8 @@ def paged_decode_attention_tensors(q: torch.Tensor, k_full: torch.Tensor,
         k_cache.stride(0), k_cache.stride(1),
         v_cache.stride(0), v_cache.stride(1),
         block_table.stride(0), block_table.stride(1),
-        NQ_PER_KV=H // k_full.shape[2], HEAD_DIM=D, BLOCK=block_size)
+        NQ_PER_KV=H // k_full.shape[2], HEAD_DIM=D, BLOCK=block_size,
+        num_warps=num_warps)
     return out
 
 

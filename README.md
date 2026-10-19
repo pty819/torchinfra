@@ -111,6 +111,29 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   **单流 61 → 177 tok/s（llama.cpp 的 83%）；并发 502 → 1208 tok/s
   （vs 串行 13.9x）**。并修复 block_table 行数按 rid 索引的越界 bug
   （rid 单调递增不复用，行数须覆盖生命周期总请求数）。
+- [x] P6 — 零同步 decode + kernel 融合（不量化的最后一轮榨取）
+  先剖析后动手（tools/profile_decode.py）：B=8 每步 wall 6.39ms 中纯 GPU
+  4.80ms，CPU 串行 1.22ms；GPU 内 hipblas 瘦 GEMV 占 72%（实测 345GB/s）。
+  ① **零同步稳态循环**（vLLM v1 overlap scheduling 核心）：热循环仅
+  `advance`（lens+1 一次 kernel）→ replay → GPU 采样（greedy=argmax）→
+  tokens GPU 直填 → 双缓冲 pinned 异步拷贝 + event，完成检测滞后消费
+  （深度 2：`query()` 未就绪缓一步，复写前才强制同步）——CPU 时间被 GPU
+  完全遮蔽；staging 只在组合变化时发生（bt 行 reserve 后不变）。
+  ② **QK-norm + RoPE + cache 写入三合一 kernel**（fused_decode.py，
+  piecewise 下注册为 fused_qkrope_op）：每层省 ~6 个小 kernel 与 rope_op
+  的两次 copy_（实测每层 4.0us，替代 ~0.3ms/步的小 kernel 群）。
+  ③ 桶扩到 16/32：权重扫描 1.19GB/步是固定成本，B 越大摊越薄。
+  ④ attention `num_warps` 4→2（实测 B=8 -11%、B=32 -23%）。
+  **单流 177 → 221 tok/s（llama.cpp 的 103%，反超）；B=8 并发 1208 →
+  1493（vs 串行 17.5x）；新增 B=16 2460、B=32 3405 tok/s**。
+  诚实记录两条"试过但不行"：Triton 定制瘦 GEMV 全面输给 hipblas
+  （170-360 vs 270-400GB/s，tools/bench_gemv.py，需 L2 轮换权重才测得真）；
+  编译版 prefill 与 piecewise cudagraph trees 冲突（prefill 插在两次回放
+  之间触发 Inductor 跳图，decode 退化 2.3x）。教训一条：差分测试的
+  cache 必须多层且用非 0 层索引——单层 cache 恰好掩盖了层偏移 bug
+  （kernel 写全落第 0 层，q 却全对，端到端第 2 个 token 才露馅）。
+  **B=32 时瓶颈已翻转到 prefill**（32 个 eager prefill 串行 ~1.6s，
+  占墙钟 2/3；decode 稳态仅 ~3.2ms/步）。
 
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
@@ -120,10 +143,14 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P3 分页 + continuous batching | 61–83 | 188 |
 | P4 CUDA Graph 整图 | 61 | 424 |
 | P4 piecewise（Inductor 融合） | 61 | 502 |
-| **P5 本轮四项优化** | **177** | **1208** |
+| P5 批采样/记账/桶/投影融合 | 177 | 1208 |
+| **P6 零同步 + kernel 融合** | **221** | **1493**（B=16 2460，B=32 3405） |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
-| 理论上限（~640GB/s 带宽） | — | ~4000 |
+| 实测带宽上限（纯读 420GB/s） | — | ~3400（B=8 等效） |
 
-下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x，理论上限
-抬到 8000-16000）、投机解码、chunked prefill。
+（"理论上限"改用实测：标称 640GB/s 是纸面值，大块纯读实测 420GB/s，
+1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。）
+
+下一步杠杆（按预期收益）：**prefill 批处理/编译兼容**（B=32 已是墙钟
+2/3）、权重量化 int4/int8（权重读减 2-4x）、投机解码、chunked prefill。
 

@@ -65,3 +65,27 @@ def sample_batch(logits: torch.Tensor, temperature=0.0, top_k: int = 0,
     sampled = torch.multinomial(probs, 1, generator=generator).squeeze(1)
     out = torch.where(greedy.squeeze(1), logits.argmax(-1), sampled)
     return out.tolist()
+
+
+def sample_batch_gpu(logits: torch.Tensor, temp: torch.Tensor,
+                     tp: torch.Tensor, use_topp: bool,
+                     generator: torch.Generator | None = None
+                     ) -> torch.Tensor:
+    """零同步批采样：返回 GPU 张量 [N]，供直接回填下一轮输入 token。
+
+    与 sample_batch 同数学；差异在接口形态——temp/tp 须为组合期构建好的
+    [N,1] GPU 张量（避免每步从 python list 构建与 GPU→CPU 判断分支），
+    是否走 top-p 由 python 侧 use_topp 决定（不做 (tp>0).any() 同步）。
+    greedy 行不消耗 RNG（multinomial 对全行都会跑，但结果被 where 丢弃，
+    RNG state 仍前进——需要逐请求可复现时用逐请求 sample_token）。
+    """
+    greedy = temp <= 0                                  # [N,1]
+    z = logits.float() / torch.where(greedy, torch.ones_like(temp), temp)
+    if use_topp:
+        sz, idx = torch.sort(z, dim=-1, descending=True)
+        pr = torch.softmax(sz, dim=-1)
+        keep = (pr.cumsum(-1) - pr) <= tp
+        z = z.scatter(1, idx, torch.where(keep, sz, float("-inf")))
+    probs = torch.softmax(z, dim=-1)
+    sampled = torch.multinomial(probs, 1, generator=generator).squeeze(1)
+    return torch.where(greedy.squeeze(1), logits.argmax(-1), sampled)
