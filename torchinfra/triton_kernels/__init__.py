@@ -1,4 +1,5 @@
 from .add import triton_add
 from .rmsnorm import TritonRMSNorm
+from .softmax import triton_softmax
 
-__all__ = ["triton_add", "TritonRMSNorm"]
+__all__ = ["triton_add", "TritonRMSNorm", "triton_softmax"]
