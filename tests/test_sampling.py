@@ -37,5 +37,35 @@ def main():
     print("sampling OK")
 
 
+def test_sample_batch():
+    from torchinfra.sampling import sample_batch
+    torch.manual_seed(0)
+    rows = torch.randn(6, 1000, device="cuda")
+    # 全 greedy
+    got = sample_batch(rows, temperature=0.0)
+    assert got == rows.argmax(-1).tolist()
+    # 混合：前 3 行 greedy，后 3 行采样（greedy 行必须精确）
+    temps = [0.0, 0.0, 0.0, 0.8, 0.8, 0.8]
+    got = sample_batch(rows, temperature=temps)
+    assert got[:3] == rows[:3].argmax(-1).tolist()
+    # top_p 截断到只剩首 token（1e-9）等价 greedy；top_p=0 表示关闭（不截断）
+    got = sample_batch(rows, temperature=1.0, top_p=[1e-9] * 6)
+    assert got == rows.argmax(-1).tolist()
+    # 极小温度应命中 argmax
+    tight = sample_batch(rows, temperature=[0.01] * 6)
+    assert tight == rows.argmax(-1).tolist()
+    # 种子可复现
+    g1 = torch.Generator(device="cuda").manual_seed(7)
+    g2 = torch.Generator(device="cuda").manual_seed(7)
+    assert (sample_batch(rows, temperature=1.0, generator=g1)
+            == sample_batch(rows, temperature=1.0, generator=g2))
+    print("sample_batch OK")
+
+
+def main2():
+    test_sample_batch()
+
+
 if __name__ == "__main__":
     main()
+    main2()
