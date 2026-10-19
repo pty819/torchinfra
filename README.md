@@ -78,5 +78,4 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   则正确）。规避：运行时乘法只放标量 base，向量部分只乘 constexpr
   （见 `paged_attn.py` 注释与 `batch_model.py`）。这也是 FlashDecoding 两阶段
   结构的由来之一（规避循环内地址计算）。
-- [ ] P3 — paged KV cache + continuous batching
 
