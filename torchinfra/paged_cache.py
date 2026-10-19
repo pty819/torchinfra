@@ -42,7 +42,20 @@ class PagedKVCache:
         self.block_table = torch.full((max_seqs, self.max_blocks_per_seq),
                                       -1, dtype=torch.int32, device=device)
         self.kv_lens = torch.zeros(max_seqs, dtype=torch.int32, device=device)
-        self._free: list[int] = list(range(num_blocks - 1, -1, -1))  # LIFO
+        self._free: list[int] = list(range(num_blocks - 1, 0, -1))  # LIFO，块 0 预留为
+        # dummy 块：CUDA Graph pad 槽位的 block_table 指向它，写入被丢弃
+
+    def reserve(self, req_id: int, n_tokens: int) -> None:
+        """预分配到 n_tokens 容量（不写数据）。GPU 侧 append kernel 写入的槽位
+        必须已分配（kernel 内无法扩表），调度器在 admit 时按 prompt+max_new 预留。"""
+        need = math.ceil(n_tokens / self.block_size)
+        have = int((self.block_table[req_id] >= 0).sum())
+        if need > have:
+            extra = need - have
+            assert len(self._free) >= extra, "块池耗尽"
+            blocks = [self._free.pop() for _ in range(extra)]
+            self.block_table[req_id, have:have + extra] = torch.tensor(
+                blocks, dtype=torch.int32, device=self.k.device)
 
     # ---- 分配 / 释放 -------------------------------------------------
     def alloc(self, req_id: int, n_tokens: int) -> int:
