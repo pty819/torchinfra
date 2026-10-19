@@ -36,15 +36,15 @@ def main():
     # 第 1 层未被污染
     assert float(cache.k[1].abs().sum()) == 0.0
 
-    # free 后复用且不残留旧数据：释放请求 0，再分配同规模必命中回收块
-    used_before = set(cache.block_table[0][:4].tolist())
+    # free 后复用且不残留旧数据：释放请求 0（2 块），再分配同规模必命中回收块
+    used_before = set(cache.block_table[0][cache.block_table[0] >= 0].tolist())
     cache.free(0)
-    cache.alloc(2, n_tokens=16)
-    used_after = set(cache.block_table[2].tolist())
+    cache.alloc(2, n_tokens=8)
+    used_after = set(cache.block_table[2][cache.block_table[2] >= 0].tolist())
     assert used_after == used_before
-    k3 = torch.full((1, n_kv, 16, hd), 7.0, device="cuda")
+    k3 = torch.full((1, n_kv, 8, hd), 7.0, device="cuda")
     cache.append(2, 0, k3, k3, start=0)
-    assert float((cache.gather(2, 0, 16)[0] - 7.0).abs().sum()) == 0.0
+    assert float((cache.gather(2, 0, 8)[0] - 7.0).abs().sum()) == 0.0
     print("PagedKVCache OK")
 
 
