@@ -52,5 +52,20 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 - [x] P1 — 纯 PyTorch 推理引擎（Qwen3-0.6B）：手写前向与 transformers 对拍
   top-1 一致率 0.943（bf16）；fp32 greedy 生成 32 token 与 HF **逐 token 一致**；
   chat CLI 可交互对话（14 tok/s）
-- [ ] P2 — 自定义算子替换（Triton：RMSNorm / softmax / RoPE）
+- [x] P2 — 自定义算子替换（Triton：add / RMSNorm / softmax / RoPE + fused residual）
+  全部对拍一致；引擎 `backend="triton"` 通过 fp32 greedy 验收。算子基准（9070 GRE，do_bench）：
+
+  | 算子 | torch ms | triton ms | 加速比 |
+  |---|---|---|---|
+  | RMSNorm [1,4096,1024] bf16 | 0.289 | 0.067 | 4.28x |
+  | softmax [32,4096] bf16 | 0.022 | 0.009 | 2.38x |
+  | RoPE q16/k8×512×128 bf16 | 0.156 | 0.030 | 5.22x |
+  | add 16M bf16 | 0.356 | 0.354 | 1.01x |
+  | residual+RMSNorm fused | 0.328 | 0.130 | 2.52x |
+
+  add 是带宽瓶颈算子（1.01x 说明 torch 已最优）；RMSNorm/RoPE 大幅领先是吃掉了
+  torch eager 的小算子调度开销；fused 省一趟显存往返拿到 2.5x。
+  Triton 踩坑记录：s==1 时 transposed 视图被 torch 视作"连续"但 stride(2)=H*D，
+  kernel 按行主序寻址直接越界（GPU page fault），需 `clone(memory_format=
+  torch.contiguous_format)` 强制紧凑布局（见 `triton_kernels/rope.py`）。
 - [ ] P3 — paged KV cache + continuous batching
