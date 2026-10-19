@@ -5,10 +5,10 @@ from torchinfra.modules import RotaryEmbedding
 
 
 @triton.jit
-def _rope_inplace_kernel(x_ptr, cos_ptr, sin_ptr, S, D: tl.constexpr,
+def _rope_inplace_kernel(x_ptr, cos_ptr, sin_ptr, S, start, D: tl.constexpr,
                          HALF: tl.constexpr, stride_row):
     row = tl.program_id(0)
-    pos = row % S   # 行主序 [b, h, s, d] 中 s 是最内层非 d 维
+    pos = start + row % S   # 行主序 [b, h, s, d] 中 s 是最内层非 d 维
     offs = tl.arange(0, HALF)
     base = row * stride_row
     x1 = tl.load(x_ptr + base + offs).to(tl.float32)
@@ -31,5 +31,5 @@ class TritonRoPE(RotaryEmbedding):
         for x, s_len in ((q, q.shape[2]), (k, k.shape[2])):
             rows = x.numel() // d
             _rope_inplace_kernel[(rows,)](
-                x, self.cos, self.sin, s_len, d, d // 2, x.stride(2))
+                x, self.cos, self.sin, s_len, start, d, d // 2, x.stride(2))
         return q, k
