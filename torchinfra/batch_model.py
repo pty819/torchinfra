@@ -67,8 +67,7 @@ def decode_step(model, token_ids: torch.Tensor, paged, req_ids: list[int]):
         k = attn.k_norm(k)
         q, k = rope_decode_batch(q, k, starts, rope_cos, rope_sin)
         for bi, r in enumerate(req_ids):
-            paged.append(r, i, k[bi:bi + 1], v[bi:bi + 1].transpose(1, 2),
-                         int(starts[bi]))
+            paged.append(r, i, k[bi:bi + 1], v[bi:bi + 1], int(starts[bi]))
         view = paged.view().slice_batch(req_ids)   # append 后再切片（kv_lens 已更新）
         out = paged_decode_attention(q, view, layer_idx=i)      # [B, H, D]
         x = x + attn.o_proj(out.reshape(B, 1, attn.n_heads * attn.hd))
