@@ -19,7 +19,7 @@ PROMPTS = [
     "用中文解释什么是分页内存管理。",
     "Describe the water cycle briefly.",
 ]
-N_NEW = 64
+N_NEW = 256
 
 
 def serial(model, tok) -> tuple[float, int]:

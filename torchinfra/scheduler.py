@@ -33,7 +33,8 @@ class Request:
 class Scheduler:
     def __init__(self, model, tok, num_blocks: int = 384, block_size: int = 16,
                  max_seqs: int = 8, dtype=torch.bfloat16,
-                 use_cudagraph: bool = True):
+                 graph_mode: str = "piecewise"):
+        """graph_mode: piecewise（默认，最快）/ manual（整图捕获）/ none（eager）"""
         self.model = model
         self.tok = tok
         self.cache = PagedKVCache(model.cfg.num_hidden_layers,
@@ -41,7 +42,7 @@ class Scheduler:
                                   model.cfg.head_dim, num_blocks=num_blocks,
                                   block_size=block_size, dtype=dtype)
         self.max_seqs = max_seqs
-        self.use_cudagraph = use_cudagraph
+        self.graph_mode = graph_mode
         self.runner = None        # 惰性创建：首个 decode 步前（此时 cache 指针已稳定）
         self._waiting: list[Request] = []
         self._running: list[Request] = []
@@ -105,10 +106,12 @@ class Scheduler:
             return finished
         reqs = self._running
         ids = [r.output_ids[-1] for r in reqs]
-        if self.runner is None and self.use_cudagraph:
-            from torchinfra.cudagraph import DecodeGraphRunner
-            self.runner = DecodeGraphRunner(self.model, self.cache,
-                                            batch_size=self.max_seqs)
+        if self.runner is None and self.graph_mode != "none":
+            from torchinfra.cudagraph import (DecodeGraphRunner,
+                                              DecodeGraphRunnerPiecewise)
+            cls = (DecodeGraphRunnerPiecewise if self.graph_mode == "piecewise"
+                   else DecodeGraphRunner)
+            self.runner = cls(self.model, self.cache, batch_size=self.max_seqs)
         if self.runner is not None:
             rids = [r.rid for r in reqs]
             starts = self.cache.kv_lens[rids].tolist()      # 每步一次同步

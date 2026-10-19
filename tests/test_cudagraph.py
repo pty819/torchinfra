@@ -81,9 +81,48 @@ def test_graph_vs_eager():
     print("DecodeGraphRunner vs eager OK（含 batch 收缩）")
 
 
+def test_piecewise_vs_eager():
+    from tests._ref import MODEL_DIR
+    from torchinfra.model import Qwen3ForCausalLM
+    from torchinfra.batch_model import decode_step
+    from torchinfra.cudagraph import DecodeGraphRunnerPiecewise
+    from torchinfra.tokenizer import TokenizerBox
+
+    model = Qwen3ForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32)
+    tok = TokenizerBox(MODEL_DIR)
+    ids = tok.encode("解释一下分页内存管理。")
+    B = 3
+
+    def fresh():
+        p = PagedKVCache(model.cfg.num_hidden_layers,
+                         model.cfg.num_key_value_heads, model.cfg.head_dim,
+                         num_blocks=128, block_size=16, dtype=torch.float32,
+                         max_seqs=8)
+        with torch.no_grad():
+            for r in range(B):
+                p.reserve(r, len(ids) + 8)
+                mirror = MirroredKVCache(p, req_id=r, max_seq=len(ids))
+                model(torch.tensor([ids], device="cuda"), kv=mirror,
+                      start_pos=0, logits_to_keep="last")
+        return p
+
+    paged_e, paged_g = fresh(), fresh()
+    runner = DecodeGraphRunnerPiecewise(model, paged_g, batch_size=8)
+    toks = [11, 22, 33]
+    with torch.no_grad():
+        ref = decode_step(model,
+                          torch.tensor(toks, device="cuda").unsqueeze(1),
+                          paged_e, list(range(B)))
+    got = runner.run(toks, [(r, len(ids)) for r in range(B)])
+    for j in range(B):
+        torch.testing.assert_close(got[j], ref[j], rtol=1e-3, atol=1e-3)
+    print("DecodeGraphRunnerPiecewise vs eager OK")
+
+
 def main():
     test_append_kv()
     test_graph_vs_eager()
+    test_piecewise_vs_eager()
 
 
 if __name__ == "__main__":

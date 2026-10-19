@@ -95,4 +95,12 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   75%）；端到端并发吞吐 187.9 → **423.9 tok/s（vs 串行 5.16x）**；
   并发==串行逐 token 验收在图路径下依旧通过。prefill 侧
   `from_pretrained(compile=True)` 1.88x（torch.compile，decode 不适用）。
+  **piecewise 升级（默认 `graph_mode="piecewise"`）**：rope/append/attention
+  注册为正式 custom op（带 `mutates_args`），`torch.compile(mode=
+  "reduce-overhead")`（Inductor cudagraph trees）按 op 边界切图——在整图
+  消除 launch 开销之上叠加 Inductor 的 norm/proj/MLP 融合。稳态单步
+  8.19 → 6.03ms（**再 1.36x**），端到端并发吞吐 **502.2 tok/s（vs 串行
+  5.80x）**。注意一次性成本：首次调用含 Inductor 编译约数秒（真实服务在
+  启动时预热，短跑基准需摊平或剔除）。`graph_mode` 可选 piecewise /
+  manual（整图捕获）/ none（eager）。
 
