@@ -38,9 +38,9 @@ def _ref_decode_attn(q, k, v, scale):
     n_kv = k.shape[1]
     kc = k.repeat_interleave(H // n_kv, dim=1)   # [1,H,L,D]
     vc = v.repeat_interleave(H // n_kv, dim=1)
-    qk = (q.float() @ kc.float().transpose(-1, -2)) * scale   # [H,1,L]
+    qk = (q.float() @ kc[0].float().transpose(-1, -2)) * scale  # [H,1,L]
     p = torch.softmax(qk, dim=-1)
-    return (p.to(v.dtype) @ vc).squeeze(1)       # [H, D]
+    return (p.to(v.dtype) @ vc[0]).squeeze(1)    # [H, D]
 
 
 def test_paged_decode():
