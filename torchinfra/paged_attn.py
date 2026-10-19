@@ -1,11 +1,12 @@
 """Triton paged decode attention：FlashDecoding 式两阶段实现。
 
-背景：本机 triton 3.8.0 + gfx1201 上，"循环内计算地址 + tl.load"的模式会被
-错误降级（tile≥1 时块地址算错，详见 README 踩坑记录），故 tile 维度由 grid
-第三维展开（kernel 内无循环），每 program 输出一个 tile 的部分 softmax 结果，
-再由 torch 做 log-sum-exp 合并。这也是真实的 FlashDecoding split-K 手法。
+tile 维度由 grid 第三维展开（kernel 内无 KV 循环），每 program 输出一个
+tile 的部分 softmax 结果（max / exp-sum / 加权 V 和），再由 torch 做
+log-sum-exp 合并——这是长上下文 decode 并行化的真实手法（split-K）。
 
-grid = (B, n_heads, num_tiles)；每 program 处理单个 (请求, 头, KV tile)。
+勘误：开发中曾误判"地址含多个运行时乘法会被编译器算错"。经独立复现证伪
+（triton 无此 bug），真实原因是全局 token 序号误作块内行号。保留两阶段
+结构因其自身价值；块内寻址一律用局部行号（offs_row）。
 """
 import torch
 import triton
@@ -41,9 +42,8 @@ def _paged_decode_partial(
                   + t * stride_bt_s).to(tl.int64)
     blk = tl.maximum(blk, 0)   # 未分配槽位是 -1：mask 全空不会解引用，夹到 0 保险
 
-    # 本机 triton+gfx1201 陷阱：地址向量中 ≥2 个运行时 stride 乘法项相加会被
-    # 错误编译。规避：运行时乘法只出现在标量 base；向量部分只乘 constexpr
-    # （行 stride == HEAD_DIM 是 constexpr，d 维天然连续）。
+    # 块内寻址用局部行号 offs_row（0..BLOCK-1）；全局 token 序号只用于 mask。
+    # （曾误用全局序号寻址导致读错区段，详见模块 docstring 的勘误。）
     k_base = blk * stride_kc_blk + kv_h * stride_kc_h
     k = tl.load(K_cache + k_base
                 + offs_row[:, None] * HEAD_DIM + offs_d[None, :],

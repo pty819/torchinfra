@@ -72,10 +72,12 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   验收全过：4 请求并发输出与串行**逐 token 一致**（fp32）；吞吐 bf16 下
   8 请求并发 175 tok/s vs 串行 82.4 tok/s = **2.12x**。
   架构：block table 两级映射（vLLM B_Loc 模式）+ FlashDecoding 式两阶段
-  attention（grid 展开 tile + log-sum-exp 合并）+ prefill 优先的迭代级调度。
-  **重要踩坑（本机 triton 3.8.0 + gfx1201 后端 bug）**：地址向量中 ≥2 个运行时
-  stride 乘法项相加会被错误编译（元素级定位：读错 head 区段；store 同表达式
-  则正确）。规避：运行时乘法只放标量 base，向量部分只乘 constexpr
-  （见 `paged_attn.py` 注释与 `batch_model.py`）。这也是 FlashDecoding 两阶段
-  结构的由来之一（规避循环内地址计算）。
+  attention（grid 展开 tile + log-sum-exp 合并，长上下文 decode 并行化的
+  真实手法）+ prefill 优先的迭代级调度。
+  **勘误（2026-10-19 复核）**：开发中一度误判"triton 3.8.0+gfx1201 存在地址
+  多乘法编译 bug"。经独立最小复现（arange 数据指纹 + 对照矩阵）与"循环版
+  kernel + 正确局部行号"复核证伪——triton 无此 bug，真实原因是自己的地址
+  bug（全局 token 序号误作块内行号）；调试中的"地址存出来正确"探针又因期望值
+  用了同样的错误算法而成为循环论证。教训：对拍参考必须与被测代码独立推导，
+  否则只是自己证明自己。
 
