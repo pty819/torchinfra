@@ -68,7 +68,18 @@ def _paged_decode_partial(
 
 def paged_decode_attention(q: torch.Tensor, view, layer_idx: int = 0
                            ) -> torch.Tensor:
-    """q [B, n_heads, 1, D]（任意布局）→ out [B, n_heads, D]。"""
+    """q [B, n_heads, 1, D]（任意布局）→ out [B, n_heads, D]。
+
+    默认走单 kernel 循环版（A/B 实测全配置快 1.5-4.3x，见
+    tools/bench_paged_attn.py）；两阶段 split-K 版保留为
+    paged_decode_attention_splitk 供对比与教学。
+    """
+    return paged_decode_attention_loop(q, view, layer_idx)
+
+
+def paged_decode_attention_splitk(q: torch.Tensor, view, layer_idx: int = 0
+                                  ) -> torch.Tensor:
+    """FlashDecoding 两阶段版（split-K）：tile 维并行换显存往返。"""
     B, H, _, D = q.shape
     n_kv = view.k.shape[2]
     assert H % n_kv == 0
@@ -102,3 +113,81 @@ def paged_decode_attention(q: torch.Tensor, view, layer_idx: int = 0
     l_g = (l * w).sum(-1)                            # [B, H]
     acc = (p * w[..., None]).sum(dim=2)              # [B, H, D]
     return (acc / l_g[..., None]).to(q.dtype)
+
+
+@triton.jit
+def _paged_decode_loop(
+    Q, K_cache, V_cache, block_table, kv_lens, Out, sm_scale,
+    stride_q_b, stride_q_h,
+    stride_kc_blk, stride_kc_h,
+    stride_vc_blk, stride_vc_h,
+    stride_bt_b, stride_bt_s,
+    NQ_PER_KV: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """单 kernel 循环版：一个 program 遍历该 (请求, 头) 的全部 KV tile。
+
+    相比两阶段版省掉 M/L/P 的显存往返；代价是并行度只有 B×n_heads——
+    batch 小时会喂不饱 GPU（两阶段的 tile 维并行正是为此存在）。
+    """
+    b = tl.program_id(0)
+    h = tl.program_id(1)
+    kv_h = h // NQ_PER_KV
+    kv_len = tl.load(kv_lens + b)
+
+    offs_d = tl.arange(0, HEAD_DIM)
+    offs_row = tl.arange(0, BLOCK)
+    q = tl.load(Q + b * stride_q_b + h * stride_q_h
+                + offs_d).to(tl.float32)              # [D]，d 维连续
+
+    m_i = -1.0e30
+    l_i = 0.0
+    acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
+
+    for nb in range(0, tl.cdiv(kv_len, BLOCK)):
+        blk = tl.load(block_table + b * stride_bt_b
+                      + nb * stride_bt_s).to(tl.int64)
+        blk = tl.maximum(blk, 0)
+        mask = nb * BLOCK + offs_row < kv_len
+        k = tl.load(K_cache + blk * stride_kc_blk + kv_h * stride_kc_h
+                    + offs_row[:, None] * HEAD_DIM + offs_d[None, :],
+                    mask=mask[:, None], other=0.0).to(tl.float32)
+        qk = tl.sum(k * q[None, :], 1) * sm_scale
+        qk = tl.where(mask, qk, -1.0e30)
+        m_new = tl.maximum(m_i, tl.max(qk, 0))
+        alpha = tl.exp(m_i - m_new)      # 首轮 exp(-1e30-…)=0，无 NaN
+        p = tl.exp(qk - m_new)
+        p = tl.where(mask, p, 0.0)
+        l_i = l_i * alpha + tl.sum(p, 0)
+        acc = acc * alpha
+        v = tl.load(V_cache + blk * stride_vc_blk + kv_h * stride_vc_h
+                    + offs_row[:, None] * HEAD_DIM + offs_d[None, :],
+                    mask=mask[:, None], other=0.0).to(tl.float32)
+        acc += tl.sum(v * p[:, None], 0)
+        m_i = m_new
+
+    tl.store(Out + (b * tl.num_programs(1) + h) * HEAD_DIM + offs_d,
+             (acc / l_i).to(Out.dtype.element_ty))
+
+
+def paged_decode_attention_loop(q: torch.Tensor, view, layer_idx: int = 0
+                                ) -> torch.Tensor:
+    """单 kernel 循环版（与两阶段版语义一致，供对比/大 batch 路径）。"""
+    B, H, _, D = q.shape
+    n_kv = view.k.shape[2]
+    k_cache = view.k[layer_idx]
+    v_cache = view.v[layer_idx]
+    assert k_cache.stride(2) == D and k_cache.stride(3) == 1
+    assert v_cache.stride(2) == D and v_cache.stride(3) == 1
+    assert q.stride(3) == 1, "q 的 head_dim 维必须连续"
+    out = torch.empty(B, H, D, dtype=q.dtype, device=q.device)
+    _paged_decode_loop[(B, H)](
+        q, k_cache, v_cache, view.block_table, view.kv_lens, out,
+        D ** -0.5,
+        q.stride(0), q.stride(1),
+        k_cache.stride(0), k_cache.stride(1),
+        v_cache.stride(0), v_cache.stride(1),
+        view.block_table.stride(0), view.block_table.stride(1),
+        NQ_PER_KV=H // n_kv, HEAD_DIM=D, BLOCK=view.block_size)
+    return out

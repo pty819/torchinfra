@@ -80,4 +80,9 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   bug（全局 token 序号误作块内行号）；调试中的"地址存出来正确"探针又因期望值
   用了同样的错误算法而成为循环论证。教训：对拍参考必须与被测代码独立推导，
   否则只是自己证明自己。
+  **后续修正**：假 bug 期间的 FlashDecoding 两阶段重构被 A/B 实测证伪性能
+  （scratch 往返 + torch 合并开销，慢 1.5-4.3x，见 `tools/bench_paged_attn.py`），
+  默认 kernel 已切回单 kernel 循环版（`paged_decode_attention`），两阶段版
+  保留为 `paged_decode_attention_splitk` 供对比；端到端并发吞吐 175 → 187.9
+  tok/s（2.28x）。
 
