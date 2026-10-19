@@ -100,14 +100,32 @@ class MLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, norm_backend: str = "torch"):
         super().__init__()
+        self._fused = norm_backend == "triton"
+        if self._fused:
+            from torchinfra.triton_kernels import TritonRMSNorm
+            norm_cls = TritonRMSNorm
+        else:
+            norm_cls = RMSNorm
         self.self_attn = Attention(cfg)
         self.mlp = MLP(cfg)
-        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+        self.input_layernorm = norm_cls(cfg.hidden_size, cfg.rms_norm_eps)
+        self.post_attention_layernorm = norm_cls(cfg.hidden_size, cfg.rms_norm_eps)
 
     def forward(self, x, rope, kv, layer_idx, start_pos):
-        x = x + self.self_attn(self.input_layernorm(x), rope, kv, layer_idx, start_pos)
-        x = x + self.mlp(self.post_attention_layernorm(x))
+        if self._fused:
+            # vLLM 式：residual 加法与下一个 norm 融合，省一次显存往返
+            from torchinfra.triton_kernels import (fused_rmsnorm_residual,
+                                                   triton_add)
+            normed = self.input_layernorm(x)
+            attn_out = self.self_attn(normed, rope, kv, layer_idx, start_pos)
+            x, normed2 = fused_rmsnorm_residual(
+                x, attn_out, self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.eps)
+            x = triton_add(x, self.mlp(normed2))
+        else:
+            x = x + self.self_attn(self.input_layernorm(x), rope, kv, layer_idx,
+                                   start_pos)
+            x = x + self.mlp(self.post_attention_layernorm(x))
         return x

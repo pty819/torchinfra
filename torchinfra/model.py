@@ -9,12 +9,18 @@ from torchinfra.weights import load_weights
 
 
 class Qwen3Model(nn.Module):
-    def __init__(self, cfg: Qwen3Config):
+    def __init__(self, cfg: Qwen3Config, norm_backend: str = "torch"):
         super().__init__()
+        if norm_backend == "triton":
+            from torchinfra.triton_kernels import TritonRMSNorm
+            norm_cls = TritonRMSNorm
+        else:
+            norm_cls = RMSNorm
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
-            DecoderLayer(cfg) for _ in range(cfg.num_hidden_layers))
-        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+            DecoderLayer(cfg, norm_backend)
+            for _ in range(cfg.num_hidden_layers))
+        self.norm = norm_cls(cfg.hidden_size, cfg.rms_norm_eps)
 
     def forward(self, input_ids, rope, kv, start_pos):
         x = self.embed_tokens(input_ids)
@@ -24,11 +30,12 @@ class Qwen3Model(nn.Module):
 
 
 class Qwen3ForCausalLM(nn.Module):
-    def __init__(self, cfg: Qwen3Config, max_seq: int = 8192):
+    def __init__(self, cfg: Qwen3Config, max_seq: int = 8192,
+                 norm_backend: str = "torch"):
         super().__init__()
         self.cfg = cfg
         self.max_seq = max_seq
-        self.model = Qwen3Model(cfg)
+        self.model = Qwen3Model(cfg, norm_backend)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
         self.rope = None  # from_pretrained 里在 dtype cast 之后创建（保 fp32）
 
@@ -40,12 +47,19 @@ class Qwen3ForCausalLM(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_dir: str | Path, device: str = "cuda",
-                        dtype=torch.bfloat16, max_seq: int = 8192):
+                        dtype=torch.bfloat16, max_seq: int = 8192,
+                        backend: str = "torch"):
         cfg = Qwen3Config.from_json(model_dir)
-        m = cls(cfg, max_seq=max_seq).to(device=device).to(dtype)
+        m = cls(cfg, max_seq=max_seq,
+                norm_backend=backend).to(device=device).to(dtype)
         # rope 的 cos/sin 必须保 fp32（大位置角对精度敏感），所以在 cast 之后创建
-        m.rope = RotaryEmbedding(cfg.head_dim, max_seq, cfg.rope_theta,
-                                 device=device)
+        if backend == "triton":
+            from torchinfra.triton_kernels import TritonRoPE
+            m.rope = TritonRoPE(cfg.head_dim, max_seq, cfg.rope_theta,
+                                device=device)
+        else:
+            m.rope = RotaryEmbedding(cfg.head_dim, max_seq, cfg.rope_theta,
+                                     device=device)
         sd = load_weights(model_dir, device=device, dtype=dtype)
         missing, unexpected = m.load_state_dict(sd, strict=False)
         assert not unexpected, f"多余权重: {unexpected}"

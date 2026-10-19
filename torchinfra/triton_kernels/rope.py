@@ -4,7 +4,7 @@ import triton.language as tl
 from torchinfra.modules import RotaryEmbedding
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["S", "start", "stride_row"])
 def _rope_inplace_kernel(x_ptr, cos_ptr, sin_ptr, S, start, D: tl.constexpr,
                          HALF: tl.constexpr, stride_row):
     row = tl.program_id(0)
@@ -22,11 +22,19 @@ def _rope_inplace_kernel(x_ptr, cos_ptr, sin_ptr, S, start, D: tl.constexpr,
 
 
 class TritonRoPE(RotaryEmbedding):
+    @staticmethod
+    def _compact(x: torch.Tensor) -> torch.Tensor:
+        # 陷阱：size-1 维的 stride 不参与 torch 的连续性判定，s==1 的
+        # transposed 视图（stride(2)=H*D）会被 contiguous()/clone() 原样
+        # 保留，而 kernel 按 stride(2)==d 的行主序寻址 → 越界。
+        x = x.contiguous()
+        if x.stride(2) != x.shape[-1]:
+            x = x.clone(memory_format=torch.contiguous_format)
+        return x
+
     def apply_qk(self, q: torch.Tensor, k: torch.Tensor, start: int):
-        # transposed 视图内存序是 [b, s, h, d]，kernel 按行主序 [b, h, s, d] 处理，
-        # 故先 contiguous（vLLM 用显式 stride 索引省掉这次拷贝，教学版从简）
-        q = q.contiguous()
-        k = k.contiguous()
+        q = self._compact(q)
+        k = self._compact(k)
         d = q.shape[-1]
         for x, s_len in ((q, q.shape[2]), (k, k.shape[2])):
             rows = x.numel() // d
