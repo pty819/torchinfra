@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import math
 import torch
 
+from torchinfra.kv_cache import KVCache
+
 
 @dataclass
 class CacheView:
