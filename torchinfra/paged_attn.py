@@ -171,23 +171,36 @@ def _paged_decode_loop(
              (acc / l_i).to(Out.dtype.element_ty))
 
 
-def paged_decode_attention_loop(q: torch.Tensor, view, layer_idx: int = 0
-                                ) -> torch.Tensor:
-    """单 kernel 循环版（与两阶段版语义一致，供对比/大 batch 路径）。"""
+def paged_decode_attention_tensors(q: torch.Tensor, k_full: torch.Tensor,
+                                   v_full: torch.Tensor, block_table: torch.Tensor,
+                                   kv_lens: torch.Tensor, layer_idx: int,
+                                   block_size: int) -> torch.Tensor:
+    """张量直通入口（CUDA Graph 路径用，无 view/fancy-index）。
+
+    q [B, n_heads, 1, D]；k/v_full [n_layers, blocks, n_kv, bs, D]；
+    返回 [B, n_heads, D]。
+    """
     B, H, _, D = q.shape
-    n_kv = view.k.shape[2]
-    k_cache = view.k[layer_idx]
-    v_cache = view.v[layer_idx]
+    k_cache = k_full[layer_idx]
+    v_cache = v_full[layer_idx]
     assert k_cache.stride(2) == D and k_cache.stride(3) == 1
     assert v_cache.stride(2) == D and v_cache.stride(3) == 1
     assert q.stride(3) == 1, "q 的 head_dim 维必须连续"
     out = torch.empty(B, H, D, dtype=q.dtype, device=q.device)
     _paged_decode_loop[(B, H)](
-        q, k_cache, v_cache, view.block_table, view.kv_lens, out,
+        q, k_cache, v_cache, block_table, kv_lens, out,
         D ** -0.5,
         q.stride(0), q.stride(1),
         k_cache.stride(0), k_cache.stride(1),
         v_cache.stride(0), v_cache.stride(1),
-        view.block_table.stride(0), view.block_table.stride(1),
-        NQ_PER_KV=H // n_kv, HEAD_DIM=D, BLOCK=view.block_size)
+        block_table.stride(0), block_table.stride(1),
+        NQ_PER_KV=H // k_full.shape[2], HEAD_DIM=D, BLOCK=block_size)
     return out
+
+
+def paged_decode_attention_loop(q: torch.Tensor, view, layer_idx: int = 0
+                                ) -> torch.Tensor:
+    """单 kernel 循环版（与两阶段版语义一致，供对比/大 batch 路径）。"""
+    return paged_decode_attention_tensors(
+        q, view.k, view.v, view.block_table, view.kv_lens, layer_idx,
+        view.block_size)

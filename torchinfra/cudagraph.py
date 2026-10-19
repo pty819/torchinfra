@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from torchinfra.paged_attn import paged_decode_attention_tensors
+
 
 @triton.jit
 def _append_kv_kernel(K_cache, V_cache, K_new, V_new, block_table, kv_lens,
@@ -52,3 +54,81 @@ def append_kv(k_cache: torch.Tensor, v_cache: torch.Tensor,
         v_new.stride(0), v_new.stride(1),
         block_table.stride(0), block_table.stride(1),
         HEAD_DIM=k_new.shape[-1], BLOCK=block_size)
+
+
+class DecodeGraphRunner:
+    """整步 decode 的 CUDA Graph 捕获与回放（vLLM 式）。
+
+    - 静态缓冲：tokens [B,1]、bt [B, W]（pad 行全 0 → dummy 块）、lens/lens_p1 [B]
+    - rope 与 append 读 lens（=start）；attention 读 lens_p1（=start+1）。
+      两个独立缓冲而非图内 add_：层间共享同一 start，原地自增会被 28 层累加
+    - pad 槽位 lens=1：attention 读 dummy 块的零值，结果丢弃
+    """
+
+    def __init__(self, model, paged, batch_size: int):
+        self.model = model
+        self.paged = paged
+        self.B = batch_size
+        W = paged.block_table.shape[1]
+        dev = paged.k.device
+        self.tokens = torch.zeros(batch_size, 1, dtype=torch.long, device=dev)
+        self.bt = torch.zeros(batch_size, W, dtype=torch.int32, device=dev)
+        self.lens = torch.ones(batch_size, dtype=torch.int32, device=dev)
+        self.lens_p1 = torch.ones(batch_size, dtype=torch.int32, device=dev)
+
+        # 标准 CUDA Graph 捕获协议：旁路流预热 3 次，再捕获
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._step()
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.out = self._step()
+
+    def _step(self) -> torch.Tensor:
+        from torchinfra.batch_model import rope_decode_batch
+        model, paged = self.model, self.paged
+        B = self.B
+        cos, sin = model.rope.cos, model.rope.sin
+        x = model.model.embed_tokens(self.tokens)
+        for i, layer in enumerate(model.model.layers):
+            h = layer.input_layernorm(x)
+            attn = layer.self_attn
+            q = attn.q_proj(h).view(B, 1, attn.n_heads, attn.hd).transpose(1, 2)
+            k = attn.k_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
+            v = attn.v_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
+            q = attn.q_norm(q)
+            k = attn.k_norm(k)
+            q, k = rope_decode_batch(q, k, self.lens, cos, sin)
+            append_kv(paged.k, paged.v, k, v, self.bt, self.lens,
+                      paged.block_size, layer_idx=i)
+            out = paged_decode_attention_tensors(
+                q, paged.k, paged.v, self.bt, self.lens_p1, i,
+                paged.block_size)
+            x = x + attn.o_proj(out.reshape(B, 1, attn.n_heads * attn.hd))
+            x = x + layer.mlp(layer.post_attention_layernorm(x))
+        x = model.model.norm(x)
+        return model.lm_head(x[:, -1:])[:, 0, :]
+
+    def run(self, tokens: list[int], rows: list[tuple[int, int]]
+            ) -> torch.Tensor:
+        """rows: [(rid, 当前 kv_len)]；回放并返回 logits [len(rows), vocab]。
+
+        返回值是图输出缓冲的视图，须在下一次 replay 前消费。
+        """
+        n = len(rows)
+        assert n <= self.B, f"batch {n} 超过捕获档位 {self.B}"
+        self.tokens.zero_()
+        self.bt.zero_()
+        self.lens.fill_(1)
+        self.tokens[:n, 0] = torch.tensor(tokens, dtype=torch.long,
+                                           device=self.tokens.device)
+        for i, (rid, cur) in enumerate(rows):
+            self.bt[i].copy_(self.paged.block_table[rid])
+            self.lens[i] = cur
+        self.lens_p1.copy_(self.lens)
+        self.lens_p1 += 1
+        self.graph.replay()
+        return self.out[:n]

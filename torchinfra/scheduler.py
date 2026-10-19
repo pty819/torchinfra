@@ -32,7 +32,8 @@ class Request:
 
 class Scheduler:
     def __init__(self, model, tok, num_blocks: int = 384, block_size: int = 16,
-                 max_seqs: int = 8, dtype=torch.bfloat16):
+                 max_seqs: int = 8, dtype=torch.bfloat16,
+                 use_cudagraph: bool = True):
         self.model = model
         self.tok = tok
         self.cache = PagedKVCache(model.cfg.num_hidden_layers,
@@ -40,6 +41,8 @@ class Scheduler:
                                   model.cfg.head_dim, num_blocks=num_blocks,
                                   block_size=block_size, dtype=dtype)
         self.max_seqs = max_seqs
+        self.use_cudagraph = use_cudagraph
+        self.runner = None        # 惰性创建：首个 decode 步前（此时 cache 指针已稳定）
         self._waiting: list[Request] = []
         self._running: list[Request] = []
         self._next_rid = 0
@@ -70,6 +73,8 @@ class Scheduler:
         return admitted
 
     def _prefill(self, req: Request) -> None:
+        # 全量预留（prompt+max_new）：GPU 侧 append kernel 无法扩表
+        self.cache.reserve(req.rid, len(req.prompt_ids) + req.max_new_tokens)
         mirror = MirroredKVCache(self.cache, req_id=req.rid,
                                  max_seq=len(req.prompt_ids))
         with torch.no_grad():
@@ -100,10 +105,22 @@ class Scheduler:
             return finished
         reqs = self._running
         ids = [r.output_ids[-1] for r in reqs]
-        with torch.no_grad():
-            logits = decode_step(self.model,
-                                 torch.tensor(ids, device="cuda").unsqueeze(1),
-                                 self.cache, [r.rid for r in reqs])
+        if self.runner is None and self.use_cudagraph:
+            from torchinfra.cudagraph import DecodeGraphRunner
+            self.runner = DecodeGraphRunner(self.model, self.cache,
+                                            batch_size=self.max_seqs)
+        if self.runner is not None:
+            rids = [r.rid for r in reqs]
+            starts = self.cache.kv_lens[rids].tolist()      # 每步一次同步
+            with torch.no_grad():
+                logits = self.runner.run(ids, list(zip(rids, starts)))
+            for rid, cur in zip(rids, starts):               # cache 计数同步
+                self.cache.kv_lens[rid] = cur + 1
+        else:
+            with torch.no_grad():
+                logits = decode_step(self.model,
+                                     torch.tensor(ids, device="cuda").unsqueeze(1),
+                                     self.cache, [r.rid for r in reqs])
         for req, row in zip(reqs, logits):
             t = sample_token(row, req.temperature, 0, req.top_p, req._gen)
             if t in self.tok.eos_ids:

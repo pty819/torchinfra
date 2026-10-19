@@ -59,13 +59,9 @@ class PagedKVCache:
 
     # ---- 分配 / 释放 -------------------------------------------------
     def alloc(self, req_id: int, n_tokens: int) -> int:
-        need = math.ceil(n_tokens / self.block_size)
-        assert len(self._free) >= need, "块池耗尽"
-        blocks = [self._free.pop() for _ in range(need)]
-        self.block_table[req_id, :need] = torch.tensor(blocks,
-                                                       dtype=torch.int32,
-                                                       device=self.k.device)
-        return need
+        """与 reserve 等价（保留两个名字兼容旧调用）。返回已分配块数。"""
+        self.reserve(req_id, n_tokens)
+        return math.ceil(n_tokens / self.block_size)
 
     def extend(self, req_id: int, n_new_tokens: int) -> None:
         cur = int(self.kv_lens[req_id])

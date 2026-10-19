@@ -85,4 +85,14 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   默认 kernel 已切回单 kernel 循环版（`paged_decode_attention`），两阶段版
   保留为 `paged_decode_attention_splitk` 供对比；端到端并发吞吐 175 → 187.9
   tok/s（2.28x）。
+- [x] P4 — decode 的 CUDA Graph 化（vLLM 式三件套）
+  ① cache 写入 GPU 化：`append_kv` kernel 消灭逐请求 `int()` 同步点
+  （`torch.compile` 实测因此于 decode 慢 0.74x）；② 静态缓冲 + pad 到固定
+  batch，pad 槽位指向预留 dummy 块 0；③ `torch.cuda.CUDAGraph` 捕获整个
+  decode step。rope/append 读 `lens`、attention 读独立缓冲 `lens_p1`（图内
+  零原地自增，避免 28 层累加）。
+  实测（bf16）：decode 单步 B=8 33.0 → 8.3ms（**3.9x**，launch 开销占 eager
+  75%）；端到端并发吞吐 187.9 → **423.9 tok/s（vs 串行 5.16x）**；
+  并发==串行逐 token 验收在图路径下依旧通过。prefill 侧
+  `from_pretrained(compile=True)` 1.88x（torch.compile，decode 不适用）。
 
