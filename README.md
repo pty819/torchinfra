@@ -103,4 +103,27 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   5.80x）**。注意一次性成本：首次调用含 Inductor 编译约数秒（真实服务在
   启动时预热，短跑基准需摊平或剔除）。`graph_mode` 可选 piecewise /
   manual（整图捕获）/ none（eager）。
+- [x] P5 — decode CPU/带宽优化（对照 llama.cpp 实测追赶）
+  同硬件同模型同精度基线（llama-bench，本机 build-amd）：**单流 213.4 tok/s**。
+  四项优化：批量 GPU 采样（单次同步）、请求长度纯 python 记账（零 GPU 读回）、
+  多档 batch 桶 1/2/4/8（单流不再陪跑 dummy）、QKV 三合一 + gate/up 二合一
+  投影融合（每层 6 个瘦 GEMM → 2 个，`warmup()` 启动预热消除编译税）。
+  **单流 61 → 177 tok/s（llama.cpp 的 83%）；并发 502 → 1208 tok/s
+  （vs 串行 13.9x）**。并修复 block_table 行数按 rid 索引的越界 bug
+  （rid 单调递增不复用，行数须覆盖生命周期总请求数）。
+
+## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
+
+| 阶段 | 单流 tok/s | 并发 B=8 tok/s |
+|---|---|---|
+| P1 手写引擎（eager chat） | ~14 | — |
+| P3 分页 + continuous batching | 61–83 | 188 |
+| P4 CUDA Graph 整图 | 61 | 424 |
+| P4 piecewise（Inductor 融合） | 61 | 502 |
+| **P5 本轮四项优化** | **177** | **1208** |
+| llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
+| 理论上限（~640GB/s 带宽） | — | ~4000 |
+
+下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x，理论上限
+抬到 8000-16000）、投机解码、chunked prefill。
 

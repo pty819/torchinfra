@@ -92,12 +92,14 @@ class DecodeGraphRunner:
         B = self.B
         cos, sin = model.rope.cos, model.rope.sin
         x = model.model.embed_tokens(self.tokens)
+        from torchinfra.fuse import attn_qkv, mlp_forward
         for i, layer in enumerate(model.model.layers):
             h = layer.input_layernorm(x)
             attn = layer.self_attn
-            q = attn.q_proj(h).view(B, 1, attn.n_heads, attn.hd).transpose(1, 2)
-            k = attn.k_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
-            v = attn.v_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
+            q, k, v = attn_qkv(h, attn)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
             q = attn.q_norm(q)
             k = attn.k_norm(k)
             q, k = rope_decode_batch(q, k, self.lens, cos, sin)
@@ -107,7 +109,7 @@ class DecodeGraphRunner:
                 q, paged.k, paged.v, self.bt, self.lens_p1, i,
                 paged.block_size)
             x = x + attn.o_proj(out.reshape(B, 1, attn.n_heads * attn.hd))
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+            x = x + mlp_forward(layer.post_attention_layernorm(x), layer.mlp)
         x = model.model.norm(x)
         return model.lm_head(x[:, -1:])[:, 0, :]
 
@@ -208,12 +210,14 @@ class DecodeGraphRunnerPiecewise:
         B = self.B
         cos, sin = model.rope.cos, model.rope.sin
         x = model.model.embed_tokens(self.tokens)
+        from torchinfra.fuse import attn_qkv, mlp_forward
         for i, layer in enumerate(model.model.layers):
             h = layer.input_layernorm(x)
             attn = layer.self_attn
-            q = attn.q_proj(h).view(B, 1, attn.n_heads, attn.hd).transpose(1, 2)
-            k = attn.k_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
-            v = attn.v_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
+            q, k, v = attn_qkv(h, attn)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
             q = attn.q_norm(q)
             k = attn.k_norm(k)
             torchinfra_rope(q, k, self.lens, cos, sin)
@@ -222,7 +226,7 @@ class DecodeGraphRunnerPiecewise:
             out = torchinfra_attn(q, paged.k, paged.v, self.bt, self.lens_p1,
                                   i, paged.block_size)
             x = x + attn.o_proj(out.reshape(B, 1, attn.n_heads * attn.hd))
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+            x = x + mlp_forward(layer.post_attention_layernorm(x), layer.mlp)
         x = model.model.norm(x)
         return model.lm_head(x[:, -1:])[:, 0, :]
 

@@ -52,6 +52,7 @@ def decode_step(model, token_ids: torch.Tensor, paged, req_ids: list[int]):
     attention 走 paged kernel；norm/MLP 等复用 model 既有层。
     """
     from torchinfra.paged_attn import paged_decode_attention
+    from torchinfra.fuse import attn_qkv, mlp_forward
     assert token_ids.shape[1] == 1
     B = token_ids.shape[0]
     starts = paged.kv_lens[req_ids].to(torch.int32).clone()  # append 前的位置
@@ -60,9 +61,10 @@ def decode_step(model, token_ids: torch.Tensor, paged, req_ids: list[int]):
     for i, layer in enumerate(model.model.layers):
         h = layer.input_layernorm(x)
         attn = layer.self_attn
-        q = attn.q_proj(h).view(B, 1, attn.n_heads, attn.hd).transpose(1, 2)
-        k = attn.k_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
-        v = attn.v_proj(h).view(B, 1, attn.n_kv, attn.hd).transpose(1, 2)
+        q, k, v = attn_qkv(h, attn)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         q = attn.q_norm(q)
         k = attn.k_norm(k)
         q, k = rope_decode_batch(q, k, starts, rope_cos, rope_sin)
@@ -71,6 +73,6 @@ def decode_step(model, token_ids: torch.Tensor, paged, req_ids: list[int]):
         view = paged.view().slice_batch(req_ids)   # append 后再切片（kv_lens 已更新）
         out = paged_decode_attention(q, view, layer_idx=i)      # [B, H, D]
         x = x + attn.o_proj(out.reshape(B, 1, attn.n_heads * attn.hd))
-        x = x + layer.mlp(layer.post_attention_layernorm(x))
+        x = x + mlp_forward(layer.post_attention_layernorm(x), layer.mlp)
     x = model.model.norm(x)
     return model.lm_head(x[:, -1:])[:, 0, :]       # [B, vocab]

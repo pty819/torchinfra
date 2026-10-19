@@ -47,6 +47,7 @@ def batched(model, tok) -> tuple[float, int]:
     sched = Scheduler(model, tok)
     for p in PROMPTS:
         sched.submit(tok.encode(p), max_new_tokens=N_NEW)
+    sched.warmup()                      # 图编译/捕获在计时外（服务启动时预热）
     t0 = time.perf_counter()
     results = sched.run()
     dt = time.perf_counter() - t0

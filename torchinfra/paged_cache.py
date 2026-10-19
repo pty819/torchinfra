@@ -28,7 +28,9 @@ class PagedKVCache:
     def __init__(self, n_layers: int, n_kv_heads: int, head_dim: int,
                  num_blocks: int, block_size: int,
                  dtype=torch.bfloat16, device: str = "cuda",
-                 max_seqs: int = 8):
+                 max_seqs: int = 256):
+        # 注意：block_table 行按 rid 索引，rid 随提交单调递增不复用，
+        # 行数须覆盖调度器生命周期内的总请求数（表本身极小，默认 256 行）
         self.n_layers = n_layers
         self.n_kv = n_kv_heads
         self.hd = head_dim
