@@ -106,3 +106,23 @@ class PagedKVCache:
     def view(self) -> CacheView:
         return CacheView(self.k, self.v, self.block_table, self.kv_lens,
                          self.block_size)
+
+
+class MirroredKVCache(KVCache):
+    """P1 contiguous cache 的镜像版：append 时同步写入分页。
+
+    prefill 复用 P1 的单请求 attention 前向，KV 同时落到分页池，
+    之后 decode 由 paged kernel 接管。
+    """
+
+    def __init__(self, paged: PagedKVCache, req_id: int, max_seq: int):
+        super().__init__(paged.n_layers, max_seq, paged.n_kv, paged.hd,
+                         dtype=paged.k.dtype, device=paged.k.device)
+        self._paged = paged
+        self._req_id = req_id
+        paged.alloc(req_id, n_tokens=max_seq)
+
+    def append(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor,
+               start: int) -> None:
+        super().append(layer_idx, k, v, start)
+        self._paged.append(self._req_id, layer_idx, k, v, start)
