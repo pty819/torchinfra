@@ -68,4 +68,18 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   Triton 踩坑记录：s==1 时 transposed 视图被 torch 视作"连续"但 stride(2)=H*D，
   kernel 按行主序寻址直接越界（GPU page fault），需 `clone(memory_format=
   torch.contiguous_format)` 强制紧凑布局（见 `triton_kernels/rope.py`）。
+- [x] P3 — paged KV cache + Triton paged decode attention + continuous batching
+  验收全过：4 请求并发输出与串行**逐 token 一致**（fp32）；吞吐 bf16 下
+  8 请求并发 175 tok/s vs 串行 82.4 tok/s = **2.12x**。
+  架构：block table 两级映射（vLLM B_Loc 模式）+ FlashDecoding 式两阶段
+  attention（grid 展开 tile + log-sum-exp 合并）+ prefill 优先的迭代级调度。
+  **重要踩坑（本机 triton 3.8.0 + gfx1201 后端 bug）**：地址向量中 ≥2 个运行时
+  stride 乘法项相加会被错误编译（元素级定位：读错 head 区段；store 同表达式
+  则正确）。规避：运行时乘法只放标量 base，向量部分只乘 constexpr
+  （见 `paged_attn.py` 注释与 `batch_model.py`）。这也是 FlashDecoding 两阶段
+  结构的由来之一（规避循环内地址计算）。
 - [ ] P3 — paged KV cache + continuous batching
+
+## 对话
+
+- [x] chat CLI（多轮）：`PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat`

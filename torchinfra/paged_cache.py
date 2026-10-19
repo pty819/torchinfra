@@ -83,9 +83,16 @@ class PagedKVCache:
     def append(self, req_id: int, layer_idx: int, k: torch.Tensor,
                v: torch.Tensor, start: int) -> None:
         """k/v [1, n_kv, s, hd]；start 为该请求已有 token 数（须等于 kv_lens）。
-        自动补块：跨块增长是常态（decode 每步 1 token）。"""
+        以 start 计算块需求（幂等）：每层 append 相同 (start, s)，不随层数累计。"""
         s = k.shape[2]
-        self.extend(req_id, s)
+        need = math.ceil((start + s) / self.block_size)
+        have = int((self.block_table[req_id] >= 0).sum())
+        if need > have:
+            extra = need - have
+            assert len(self._free) >= extra, "块池耗尽"
+            blocks = [self._free.pop() for _ in range(extra)]
+            self.block_table[req_id, have:have + extra] = torch.tensor(
+                blocks, dtype=torch.int32, device=self.k.device)
         # 教学版逐 token 写入；按段拷贝的优化版留给进阶
         for t in range(s):
             blk, off = self._locate(req_id, start + t)
