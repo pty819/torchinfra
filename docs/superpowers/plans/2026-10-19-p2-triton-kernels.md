@@ -44,7 +44,7 @@ docs/notes/2026-10-19-vllm-triton-kernel-notes.md   # T8
 **Interfaces:**
 - Produces: `triton_add(x: Tensor, y: Tensor) -> Tensor`（bf16/fp32，1D 展平语义）；kernel `_add_kernel` 带 `@triton.autotune`
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 # tests/test_triton_add.py
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/triton_kernels/add.py
@@ -101,7 +101,7 @@ def triton_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 `__init__.py` 先只导出 `triton_add`。
 
-- [ ] **Step 4: 通过 + commit** `P2: Triton elementwise add`
+- [x] **Step 4: 通过 + commit** `P2: Triton elementwise add`
 
 ### Task 2: Triton RMSNorm
 
@@ -112,7 +112,7 @@ def triton_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 **Interfaces:**
 - Produces: `triton_rmsnorm(x: Tensor [rows, N], w: Tensor[N], eps) -> Tensor`（输入须 2D 连续或可 reshape；模块 `TritonRMSNorm(nn.Module)` 与 `modules.RMSNorm` 同参名 `weight`、同 forward 语义，非连续输入先 `.contiguous()`）
 
-- [ ] **Step 1: 失败测试**（对拍 P1 的 torch RMSNorm：随机权重、bf16/fp32、含 N 非 2 幂）
+- [x] **Step 1: 失败测试**（对拍 P1 的 torch RMSNorm：随机权重、bf16/fp32、含 N 非 2 幂）
 
 ```python
 # tests/test_triton_rmsnorm.py
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/triton_kernels/rmsnorm.py
@@ -197,7 +197,7 @@ class TritonRMSNorm(nn.Module):
 
 `__init__.py` 增加导出。
 
-- [ ] **Step 4: 通过 + commit** `P2: Triton RMSNorm（对拍 torch 实现）`
+- [x] **Step 4: 通过 + commit** `P2: Triton RMSNorm（对拍 torch 实现）`
 
 ### Task 3: Triton softmax（last-dim）
 
@@ -208,7 +208,7 @@ class TritonRMSNorm(nn.Module):
 **Interfaces:**
 - Produces: `triton_softmax(x: Tensor [rows, N]) -> Tensor`；单 pass、max 减法稳定、fp32 累加；BLOCK 由 wrapper 取 `next_pow2(N)`，只 autotune num_warps（BLOCK < N 会算错，故不能进 autotune configs）
 
-- [ ] **Step 1: 失败测试**（对拍 `torch.softmax`，含极端值 1e30 验证数值稳定 + N 非 2 幂 1000）
+- [x] **Step 1: 失败测试**（对拍 `torch.softmax`，含极端值 1e30 验证数值稳定 + N 非 2 幂 1000）
 
 ```python
 # tests/test_triton_softmax.py
@@ -236,7 +236,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/triton_kernels/softmax.py
@@ -282,7 +282,7 @@ def triton_softmax(x: torch.Tensor) -> torch.Tensor:
     return out.view(x.shape)
 ```
 
-- [ ] **Step 4: 通过 + commit** `P2: Triton softmax（max 减法稳定）`
+- [x] **Step 4: 通过 + commit** `P2: Triton softmax（max 减法稳定）`
 
 ### Task 4: Triton RoPE
 
@@ -294,7 +294,7 @@ def triton_softmax(x: torch.Tensor) -> torch.Tensor:
 - Consumes: `modules.RotaryEmbedding`（继承其 fp32 cos/sin buffer）
 - Produces: `class TritonRoPE(RotaryEmbedding)`：`apply_qk(q, k, start)` **原地**旋转并返回（q/k 会先 `.contiguous()`——transposed 张量内存序是 [b,s,h,d]，kernel 按行主序处理；教学版接受这次拷贝，vLLM 用显式 stride 索引避免它，笔记里记）
 
-- [ ] **Step 1: 失败测试**（对拍 torch `RotaryEmbedding.apply_qk`，bf16 + fp32，非零 start）
+- [x] **Step 1: 失败测试**（对拍 torch `RotaryEmbedding.apply_qk`，bf16 + fp32，非零 start）
 
 ```python
 # tests/test_triton_rope.py
@@ -323,7 +323,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 ```python
 # torchinfra/triton_kernels/rope.py
@@ -365,7 +365,7 @@ class TritonRoPE(RotaryEmbedding):
 
 （stride_row 实为 x.stride(2)=d——行内连续；`x.stride(2)` 传 d 保持显式。）
 
-- [ ] **Step 4: 通过 + commit** `P2: Triton RoPE（half-split 原地）`
+- [x] **Step 4: 通过 + commit** `P2: Triton RoPE（half-split 原地）`
 
 ### Task 5: fused RMSNorm + residual
 
@@ -376,7 +376,7 @@ class TritonRoPE(RotaryEmbedding):
 **Interfaces:**
 - Produces: `fused_rmsnorm_residual(x: Tensor[rows,N], dx: Tensor, w, eps) -> (residual, normed)`：`residual = (x+dx)`（按输出 dtype 舍入后存储）、`normed = rmsnorm(residual)*w`——与"先 add 存 bf16 再 norm"的 torch 序列逐位同策略；模块 `FusedRMSNormResidual(nn.Module)`
 
-- [ ] **Step 1: 追加失败测试**
+- [x] **Step 1: 追加失败测试**
 
 ```python
 # 追加到 tests/test_triton_rmsnorm.py
@@ -406,7 +406,7 @@ def test_fused():
     print("fused_rmsnorm_residual OK")
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现（单 pass，BLOCK≥N 时一趟完成）**
+- [x] **Step 2: 确认失败 → Step 3: 实现（单 pass，BLOCK≥N 时一趟完成）**
 
 ```python
 # 追加到 torchinfra/triton_kernels/rmsnorm.py
@@ -446,7 +446,7 @@ def fused_rmsnorm_residual(x: torch.Tensor, dx: torch.Tensor,
 
 注意：`res` 存的是 fp32 的 r（未舍入）还是舍入值？torch 参考的 residual 是 bf16 的——所以 `res` 也应存舍入值，`normed` 用舍入值算。上面 `res` 存了 `r`（fp32）需改为存 `r.to(dtype)`；实现时以"res 与 res_ref 逐位一致"为准修正。（TDD 会抓住这个。）
 
-- [ ] **Step 4: 通过 + commit** `P2: fused RMSNorm+residual`
+- [x] **Step 4: 通过 + commit** `P2: fused RMSNorm+residual`
 
 ### Task 6: 引擎集成（backend="triton"）+ 终局验收
 
@@ -458,7 +458,7 @@ def fused_rmsnorm_residual(x: torch.Tensor, dx: torch.Tensor,
 **Interfaces:**
 - Produces: `DecoderLayer.__init__(cfg, norm_backend="torch")`；`Qwen3ForCausalLM.from_pretrained(model_dir, ..., backend="torch")`；triton 路径：norm 全走 `TritonRMSNorm`，残差加法走 `fused_rmsnorm_residual`，rope 用 `TritonRoPE`；attention 内 softmax 保持 torch（融合进 attention kernel 是 P3 范围）
 
-- [ ] **Step 1: 失败测试**
+- [x] **Step 1: 失败测试**
 
 ```python
 # tests/test_p2_integration.py
@@ -502,7 +502,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: 确认失败 → Step 3: 实现**
+- [x] **Step 2: 确认失败 → Step 3: 实现**
 
 modules.py 的 `DecoderLayer.__init__` 加 `norm_backend` 参数；triton 时 `input_layernorm/post_attention_layernorm` 用 `TritonRMSNorm`（import 放函数内避免循环依赖/无 triton 环境下 torch 路径仍可用）。forward 分支：
 
@@ -525,7 +525,7 @@ def forward(self, x, rope, kv, layer_idx, start_pos):
 
 model.py：`Qwen3Model.__init__(cfg, norm_backend)`、`Qwen3ForCausalLM.__init__(cfg, max_seq, norm_backend="torch")`；`from_pretrained(..., backend="torch")` → `norm_backend=backend`，且 triton 时 `m.rope = TritonRoPE(...)`（import 局部）。model 末尾 `self.norm` 同样按后端选择。
 
-- [ ] **Step 4: 通过（含 P1 回归：test_model.py、test_p1_acceptance.py 用默认 torch 后端）+ commit** `P2: 引擎接入 Triton 后端（norm/rope/fused residual）`
+- [x] **Step 4: 通过（含 P1 回归：test_model.py、test_p1_acceptance.py 用默认 torch 后端）+ commit** `P2: 引擎接入 Triton 后端（norm/rope/fused residual）`
 
 ### Task 7: benchmark 汇总
 
@@ -535,7 +535,7 @@ model.py：`Qwen3Model.__init__(cfg, norm_backend)`、`Qwen3ForCausalLM.__init__
 **Interfaces:**
 - Produces: 一张 markdown 表：每算子 triton vs torch（及 fused vs 未融合）在代表性 shape 下的 `do_bench` 毫秒与加速比；结果粘贴进 README
 
-- [ ] **Step 1: 实现**（shape 取引擎真实值：rmsnorm/fused 用 [1,4096,1024] bf16；softmax [32,4096]；rope q[1,16,4096,128]+k[1,8,4096,128]；add 16M 元素）
+- [x] **Step 1: 实现**（shape 取引擎真实值：rmsnorm/fused 用 [1,4096,1024] bf16；softmax [32,4096]；rope q[1,16,4096,128]+k[1,8,4096,128]；add 16M 元素）
 
 ```python
 # tools/bench_ops.py
@@ -595,16 +595,16 @@ if __name__ == "__main__":
 
 （unfused 里每次构建 RMSNorm 不公平——实现时把模块提出闭包外。）
 
-- [ ] **Step 2: 跑通并把表粘进 README + commit** `P2: 算子基准表`
+- [x] **Step 2: 跑通并把表粘进 README + commit** `P2: 算子基准表`
 
 ### Task 8: vLLM/SGLang Triton kernel 阅读笔记
 
 **Files:**
 - Create: `docs/notes/2026-10-19-vllm-triton-kernel-notes.md`
 
-- [ ] **Step 1:** 用 GitHub 工具读 vLLM 的 `vllm/attention/triton_backend/flash_attention_kernels.py`（或 SGLang 等价 Triton attention kernel）
-- [ ] **Step 2:** 写笔记（≥400 字）：grid/block 划分方式、paged KV 的 block table 索引方法、causal mask 的处理、与我们 P2/P3 kernel 的对应关系、至少 3 个可借鉴的技巧（如 `tl.multiple_of`/`max_contiguous`、exp2 代替 exp、软件流水）
-- [ ] **Step 3: commit** `P2: vLLM Triton attention kernel 阅读笔记`
+- [x] **Step 1:** 用 GitHub 工具读 vLLM 的 `vllm/attention/triton_backend/flash_attention_kernels.py`（或 SGLang 等价 Triton attention kernel）
+- [x] **Step 2:** 写笔记（≥400 字）：grid/block 划分方式、paged KV 的 block table 索引方法、causal mask 的处理、与我们 P2/P3 kernel 的对应关系、至少 3 个可借鉴的技巧（如 `tl.multiple_of`/`max_contiguous`、exp2 代替 exp、软件流水）
+- [x] **Step 3: commit** `P2: vLLM Triton attention kernel 阅读笔记`
 
 ---
 
