@@ -50,6 +50,15 @@ def main():
     with torch.no_grad():
         model(torch.zeros(1, 4, dtype=torch.long, device="cuda"), kv=kv,
               start_pos=0, logits_to_keep="last")
+    # 预热批量 prefill 的 Triton kernel（JIT 编译须移出计时窗）
+    from torchinfra.paged_cache import PagedKVCache
+    from torchinfra.prefill import prefill_batch
+    paged = PagedKVCache(model.cfg.num_hidden_layers,
+                         model.cfg.num_key_value_heads, model.cfg.head_dim,
+                         num_blocks=8, block_size=16)
+    paged.reserve(0, 8)
+    with torch.no_grad():
+        prefill_batch(model, paged, [[1, 5, 9, 3, 7, 2, 8, 4]], bt_rows=[0])
     print(f"Qwen3-0.6B bf16 @ 9070 GRE，每请求 {N_NEW} new tokens\n")
     for b in batches:
         tps = bench(model, tok, b)

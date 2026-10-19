@@ -14,7 +14,7 @@ decode 侧 CPU 开销优化（对照现代引擎，逐层递进）：
 from dataclasses import dataclass, field
 import torch
 
-from torchinfra.paged_cache import PagedKVCache, MirroredKVCache
+from torchinfra.paged_cache import PagedKVCache
 from torchinfra.batch_model import decode_step
 from torchinfra.sampling import sample_token, sample_batch, sample_batch_gpu
 
@@ -95,23 +95,35 @@ class Scheduler:
             admitted.append(req)
         return admitted
 
-    def _prefill(self, req: Request) -> None:
-        # 全量预留（prompt+max_new）：GPU 侧 append kernel 无法扩表
-        self.cache.reserve(req.rid, len(req.prompt_ids) + req.max_new_tokens)
-        mirror = MirroredKVCache(self.cache, req_id=req.rid,
-                                 max_seq=len(req.prompt_ids))
+    def _prefill_batch(self, reqs: list[Request]) -> list[Request]:
+        """批量 prefill：整轮 prompt 打包一次前向（权重只扫一遍）。
+
+        P6 剖析：逐请求 prefill 在 B=32 占墙钟 2/3；批化后 GEMM 全在
+        [sum_S, E] 上跑，注意力/ cache 写入走 varlen kernel。
+        """
+        from torchinfra.prefill import prefill_batch
+        for req in reqs:
+            self.cache.reserve(req.rid,
+                               len(req.prompt_ids) + req.max_new_tokens)
         with torch.no_grad():
-            logits = self.model(
-                torch.tensor([req.prompt_ids], device="cuda"), kv=mirror,
-                start_pos=0, logits_to_keep="last")
-        req.kv_len = len(req.prompt_ids)
-        t = sample_token(logits[0, -1], req.temperature, 0, req.top_p, req._gen)
-        if t in self.tok.eos_ids:
-            req.state = "finished"
-            self.cache.free(req.rid)
-            return
-        req.output_ids.append(t)
-        req.state = "running"
+            logits = prefill_batch(self.model, self.cache,
+                                   [r.prompt_ids for r in reqs],
+                                   bt_rows=[r.rid for r in reqs])
+        toks = sample_batch(logits,
+                            temperature=[r.temperature for r in reqs],
+                            top_p=[r.top_p for r in reqs],
+                            generator=self._gen)
+        finished = []
+        for req, t in zip(reqs, toks):
+            req.kv_len = len(req.prompt_ids)
+            if t in self.tok.eos_ids:
+                req.state = "finished"
+                finished.append(req)
+                self.cache.free(req.rid)
+            else:
+                req.output_ids.append(t)
+                req.state = "running"
+        return finished
 
     def _get_runner(self, n: int):
         size = next((b for b in self.buckets if b >= n), self.buckets[-1])
@@ -245,11 +257,7 @@ class Scheduler:
         """推进一个迭代：装载+prefill 新请求；无新 prefill 时 decode 全体一步。"""
         admitted = self._admit()
         if admitted:
-            finished = []
-            for req in admitted:          # prefill 优先：本轮不做 decode
-                self._prefill(req)
-                if req.state == "finished":
-                    finished.append(req)
+            finished = self._prefill_batch(admitted)   # 整轮打包 prefill
             self._running.extend(r for r in admitted if r.state == "running")
             self._running = [r for r in self._running if r.state != "finished"]
             return finished

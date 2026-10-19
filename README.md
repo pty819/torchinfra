@@ -134,6 +134,20 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   （kernel 写全落第 0 层，q 却全对，端到端第 2 个 token 才露馅）。
   **B=32 时瓶颈已翻转到 prefill**（32 个 eager prefill 串行 ~1.6s，
   占墙钟 2/3；decode 稳态仅 ~3.2ms/步）。
+- [x] P7 — 批量 prefill（打包前向 + varlen 因果 kernel）
+  消灭 P6 发现的 prefill 瓶颈：同一轮装载的全部 prompt 打包成**一次**前向
+  （prefill.py）——权重部分全批化（embedding/qkv/o/MLP/lm_head 都在
+  [sum_S, E] 上跑，32 个 prompt 只扫一遍权重）；attention 用 Triton varlen
+  因果 kernel（cu_seqlens 划界 + 在线 softmax，prefill 不读 cache——上下文
+  就是本轮自己算出的 k/v）；k/v 写入 paged cache 用打包 kernel（块表寻址，
+  grid (B, n_kv, maxS)）。RoPE/QK-norm 与 apply_qk/RMSNorm 逐位同式。
+  差分测试（test_prefill.py，长度含 16/17/33 块边界）：logits max diff
+  2.2e-05、argmax 全一致、cache 逐层对拍通过。开发中踩两个坑记录在案：
+  kernel 实参顺序传反（cache 指针与打包指针互换 → 页错误）；acc*alpha
+  少广播维（2D acc 需 alpha[:, None]）。
+  **B=8 1493 → 1707（+14%）；B=16 2460 → 3160（+28%）；B=32 3405 →
+  4980 tok/s（+46%）**；单流 217（llama.cpp 的 102%）持平——decode 端
+  未动。旧逐请求 prefill 与其调度器死代码已删除。
 
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
@@ -144,13 +158,15 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P4 CUDA Graph 整图 | 61 | 424 |
 | P4 piecewise（Inductor 融合） | 61 | 502 |
 | P5 批采样/记账/桶/投影融合 | 177 | 1208 |
-| **P6 零同步 + kernel 融合** | **221** | **1493**（B=16 2460，B=32 3405） |
+| P6 零同步 + kernel 融合 | 221 | 1493（B=16 2460，B=32 3405） |
+| **P7 批量 prefill** | **217** | **1707（B=16 3160，B=32 4980）** |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
 | 实测带宽上限（纯读 420GB/s） | — | ~3400（B=8 等效） |
 
 （"理论上限"改用实测：标称 640GB/s 是纸面值，大块纯读实测 420GB/s，
-1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。）
+1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 4980 已显著
+超过该"B=8 等效"值——批越大每 token 摊的权重读越薄，上限随 B 上移。）
 
-下一步杠杆（按预期收益）：**prefill 批处理/编译兼容**（B=32 已是墙钟
-2/3）、权重量化 int4/int8（权重读减 2-4x）、投机解码、chunked prefill。
+下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
+投机解码、chunked prefill（长 prompt 分片防独占）、prefill 编译兼容。
 
