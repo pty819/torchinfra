@@ -31,6 +31,18 @@ def _rmsnorm_kernel(x_ptr, w_ptr, out_ptr, stride, N, eps,
                  mask=mask)
 
 
+def triton_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
+                   ) -> torch.Tensor:
+    """函数式 RMSNorm：x [*, N] 连续化后整行一趟（与模块同 kernel）。"""
+    x = x.contiguous()
+    shape = x.shape
+    x2 = x.view(-1, shape[-1])
+    out = torch.empty_like(x2)
+    _rmsnorm_kernel[(x2.shape[0],)](x2, w, out, out.stride(0),
+                                    shape[-1], eps)
+    return out.view(shape)
+
+
 class TritonRMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()

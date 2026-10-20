@@ -14,13 +14,16 @@ from torchinfra.prefill import prefill_batch
 
 # 1 / 块内 / 块边界±1 / 跨多块，ragged
 LENS = [1, 5, 16, 17, 33, 64]
+# 长序列（覆盖 SDPA 混合路径，阈值 max_s>=512）：ragged + 边界
+LENS_LONG = [600, 512, 700, 33]
 
 
 def main():
     torch.manual_seed(0)
     model = Qwen3ForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32)
     cfg = model.cfg
-    prompts = [torch.randint(1000, 50000, (L,)).tolist() for L in LENS]
+    prompts = ([torch.randint(1000, 50000, (L,)).tolist() for L in LENS]
+               + [torch.randint(1000, 50000, (L,)).tolist() for L in LENS_LONG])
 
     # ---- 参考串行：P1 路径逐请求 ----
     ref_logits = []
@@ -38,7 +41,7 @@ def main():
 
     # ---- 被测：打包批量 ----
     paged = PagedKVCache(cfg.num_hidden_layers, cfg.num_key_value_heads,
-                         cfg.head_dim, num_blocks=64, block_size=16,
+                         cfg.head_dim, num_blocks=192, block_size=16,
                          dtype=torch.float32)
     for rid, p in enumerate(prompts):
         paged.reserve(rid, len(p))

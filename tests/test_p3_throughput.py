@@ -48,6 +48,14 @@ def batched(model, tok) -> tuple[float, int]:
     for p in PROMPTS:
         sched.submit(tok.encode(p), max_new_tokens=N_NEW)
     sched.warmup()                      # 图编译/捕获在计时外（服务启动时预热）
+    # prefill 路径的 Triton kernel/SDPA 首调初始化也移出计时窗
+    from torchinfra.paged_cache import PagedKVCache
+    from torchinfra.prefill import prefill_batch
+    p0 = PagedKVCache(model.cfg.num_hidden_layers,
+                      model.cfg.num_key_value_heads, model.cfg.head_dim,
+                      num_blocks=8, block_size=16)
+    p0.reserve(0, 8)
+    prefill_batch(model, p0, [[1, 5, 9, 3, 7, 2, 8, 4]], bt_rows=[0])
     t0 = time.perf_counter()
     results = sched.run()
     dt = time.perf_counter() - t0

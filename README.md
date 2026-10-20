@@ -197,6 +197,29 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   输给 hipblas 的结论不适用于 M≥416 的计算型形状）。短 prompt 负载下
   prefill 只占端到端 ~2% 故未继续追；长 prompt TTFT 场景值得回来挖。
 
+- [x] P10 — 长输入 prefill 拉满（13 token 短 prompt 之外的真实战场）
+  用户点破"P9 拿 13 token 测的不算数"。长输入基准确认：S=4096 时注意力
+  kernel 占 50%（23.8 TFLOPS），S=8192 端到端只剩 14.3 TFLOPS（二次项
+  吃掉一半算力）。四步修复：
+  ① **注意力换 SDPA**（max_s≥512 时逐请求走 torch 融合后端
+  `flyc_attn_fwd`：S=4096 实测 67.6 vs 自研 kernel 调优后 25.3 TFLOPS，
+  2.7x——短批仍走自研打包 kernel，两者混合）；
+  ② 自研 kernel tile 调优备胎（TQ=128/TK=64/w8/st2，64KB LDS 上限内）；
+  ③ qk-norm+rope+cache 三合一改 **2D 行块 tile**（[16 行,128 维] 向量化、
+  归约沿 D 轴，cos/sin 行内复用；行循环版 S=4096 实测 7.9ms→tile 版
+  ~4ms）。教训一条：**TR=8 配置在 gfx1201 上确定性算错**（TR=16 正确、
+  内部行也错排除掩码问题）——又一个 codegen 怪癖，锁定 TR=16；
+  ④ norm/silu 换 P2 稳定 Triton kernel（`triton_rmsnorm`/`silu_mul`，
+  避开 P8 出问题的 `_fused_kernel`）+ prefill_batch 自动投影融合
+  （未融合时会走 cat 回退慢 30%+）。
+  结果（tools/bench_prefill.py）：S=4096 单条 **165 → 96ms（-42%）**、
+  S=8192 **503 → 257ms（-49%）**、S=1024 29.6→18.9、B=8×128 25.1→18.7。
+  机器实际吞吐（含注意力 FLOPs）S=4096 ≈ **57 TFLOPS**（可达成上限
+  104 的 55%；剩余大头 GEMM@74 与 SDPA@67 均已贴各自天花板）。
+  官方吞吐测试补 prefill 预热后 **19.5x / 1686 tok/s**（B=8）。端到端
+  短 prompt 基准不变（B=32 5240）。差分测试补长序列组（600/512/700）
+  覆盖 SDPA 路径，21 测试全绿。
+
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
 | 阶段 | 单流 tok/s | 并发 B=8 tok/s |
@@ -209,7 +232,8 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P6 零同步 + kernel 融合 | 221 | 1493（B=16 2460，B=32 3405） |
 | P7 批量 prefill | 217 | 1707（B=16 3160，B=32 4980） |
 | P8 加固（mark_static_address） | 220 | 1738（B=16 3208，B=32 5023） |
-| **P9 prefill 榨干（tensor core + 三合一复用）** | **223** | **1772（B=16 3317，B=32 5265）** |
+| P9 prefill 榨干（短 prompt） | 223 | 1772（B=16 3317，B=32 5265） |
+| **P10 长输入 prefill（SDPA 混合 + tile 化）** | **224** | **1686 官方 19.5x（B=32 5240；长输入 S=4K 减半）** |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
 | 实测带宽上限（纯读 420 / 规格 432GB/s） | — | ~3400（B=8 等效） |
 

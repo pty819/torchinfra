@@ -1,5 +1,5 @@
 from .add import triton_add
-from .rmsnorm import TritonRMSNorm, fused_rmsnorm_residual
+from .rmsnorm import TritonRMSNorm, fused_rmsnorm_residual, triton_rmsnorm
 from .softmax import triton_softmax
 from .rope import TritonRoPE
 
