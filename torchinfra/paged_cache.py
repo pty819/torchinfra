@@ -41,6 +41,11 @@ class PagedKVCache:
         self.k = torch.zeros(n_layers, num_blocks, n_kv_heads, block_size,
                              head_dim, dtype=dtype, device=device)
         self.v = torch.zeros_like(self.k)
+        # vLLM 式：KV cache 标记为静态地址，否则 custom op 对它的 mutation
+        # 会让 cudagraph trees "skipping cudagraphs due to mutated inputs"
+        # （decode 退化 ~5x）。cache 张量生命周期与引擎一致，地址不迁移。
+        torch._dynamo.mark_static_address(self.k)
+        torch._dynamo.mark_static_address(self.v)
         self.block_table = torch.full((max_seqs, self.max_blocks_per_seq),
                                       -1, dtype=torch.int32, device=device)
         self.kv_lens = torch.zeros(max_seqs, dtype=torch.int32, device=device)

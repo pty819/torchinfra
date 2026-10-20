@@ -150,10 +150,14 @@ class DecodeGraphRunner(_SteadyAPI):
     """
 
     def __init__(self, model, paged, batch_size: int):
+        from torchinfra.fuse import fuse_decode_projections
+        fuse_decode_projections(model)      # _step 直接用融合权重（幂等）
         self.model = model
         self.paged = paged
         self.B = batch_size
         self._init_steady_bufs(paged, batch_size)
+        self._zero = torch.zeros(batch_size, model.cfg.hidden_size,
+                                 dtype=paged.k.dtype, device=paged.k.device)
 
         # 标准 CUDA Graph 捕获协议：旁路流预热 3 次，再捕获
         s = torch.cuda.Stream()
@@ -167,6 +171,10 @@ class DecodeGraphRunner(_SteadyAPI):
             self.out = self._step()
 
     def _step(self) -> torch.Tensor:
+        """P7 版 kernel 链（P8 曾试过 fused_rmsnorm_residual 全融合链并回退：
+        gfx1201 上深层 eager 链中 _fused_kernel 表现出输入正确但输出错误的
+        翻转行为（随脚本结构变化，与 silu/attention 无关，详见 README P8），
+        取证未定位到根因，保守回退到全验证路径）。"""
         model, paged = self.model, self.paged
         B = self.B
         cos, sin = model.rope.cos, model.rope.sin
@@ -270,6 +278,10 @@ class DecodeGraphRunnerPiecewise(_SteadyAPI):
     """
 
     def __init__(self, model, paged, batch_size: int):
+        from torchinfra.fuse import fuse_decode_projections
+        # 必须融合：unfused 回退里 rope_op 原地改 q/k，配合 mark_static_address
+        # 会让 cudagraph trees 对 mutation 做整 cache 函数化克隆 → 页错误
+        fuse_decode_projections(model)
         _register_ops()
         self.model = model
         self.paged = paged

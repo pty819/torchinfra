@@ -149,6 +149,30 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   4980 tok/s（+46%）**；单流 217（llama.cpp 的 102%）持平——decode 端
   未动。旧逐请求 prefill 与其调度器死代码已删除。
 
+- [x] P8 — 对照 vLLM/SGLang 源码的一轮加固（一个雷、一个崩、一个负结果）
+  通读 vLLM `config/compilation.py` 与 SGLang 调度/图实现后的三件事：
+  ① **修复潜伏两阶段的静默退化雷**：`fused_qkrope_op` 对 KV cache 的
+  mutation 会让 cudagraph trees 报 "skipping cudagraphs due to mutated
+  inputs"——P6/P7 的图一直在旧编译缓存的历史路径上跑，某次核心转储
+  触发重编译后 decode 从 1598 **静默跌到 283 tok/s（5.6x）**。修法即
+  vLLM 同款：`torch._dynamo.mark_static_address(k/v cache)`（cache 地址
+  与引擎同生命周期，不迁移）。
+  ② **修复 unfused 回退 + ①的崩溃**：runners 未融合时 `rope_op` 原地改
+  q/k，配合 mark_static_address 会让 Inductor 做整 cache 函数化克隆
+  （grid 26 万的 pointwise）→ 页错误。两个 runner 构造时统一自动
+  `fuse_decode_projections`（幂等）。
+  ③ **负结果**：按 vLLM FULL 模式思路用 `fused_rmsnorm_residual` 重写
+  manual 整图链（每层 9 kernel）并回退——gfx1201 上 `_fused_kernel` 在
+  深层 eager 链中表现出「输入已验证正确、输出连 x+dx 都错」且随脚本
+  结构（函数级/模块级）翻转的行为；25+ 次取证（多进程重放/克隆输入/
+  同步/清缓存/逐部件排除 silu·attention·eps·别名）未定位根因，单测
+  始终全绿、仅长链触发。保守回退，default piecewise 不受影响。
+  复测（修雷后图恢复+稳定捕获）：单流 220 / B=8 1738 / B=16 3208 /
+  **B=32 5023 tok/s**（18.5x），全部 21 测试通过。
+  调研中其它值得记录的：vLLM 默认 FULL_AND_PIECEWISE（decode 整图），
+  有与我们 P6 同款的 `fuse_qk_norm_rope_kvcache` pass（方向印证）；
+  SGLang 的 overlap 调度我们在 P6 已实现同构；两大引擎的下一个大
+  杠杆是 n-gram/EAGLE 投机解码（无需量化、拒绝采样保持分布不变）。
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
 | 阶段 | 单流 tok/s | 并发 B=8 tok/s |
@@ -159,12 +183,13 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P4 piecewise（Inductor 融合） | 61 | 502 |
 | P5 批采样/记账/桶/投影融合 | 177 | 1208 |
 | P6 零同步 + kernel 融合 | 221 | 1493（B=16 2460，B=32 3405） |
-| **P7 批量 prefill** | **217** | **1707（B=16 3160，B=32 4980）** |
+| P7 批量 prefill | 217 | 1707（B=16 3160，B=32 4980） |
+| **P8 加固（mark_static_address）** | **220** | **1738（B=16 3208，B=32 5023）** |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
 | 实测带宽上限（纯读 420GB/s） | — | ~3400（B=8 等效） |
 
 （"理论上限"改用实测：标称 640GB/s 是纸面值，大块纯读实测 420GB/s，
-1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 4980 已显著
+1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 5023 已显著
 超过该"B=8 等效"值——批越大每 token 摊的权重读越薄，上限随 B 上移。）
 
 下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
