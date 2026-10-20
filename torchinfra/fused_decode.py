@@ -17,7 +17,7 @@ import triton.language as tl
 
 @triton.jit
 def _qk_rope_append_kernel(
-    QKV, QNW, KNW, COS, SIN, starts, bt, K_cache, V_cache, QOut,
+    QKV, QNW, KNW, COS, SIN, starts, bt, K_cache, V_cache, QOut, KOut,
     s_qkv_b,
     s_cos,
     s_bt_b, s_bt_s,
@@ -25,7 +25,12 @@ def _qk_rope_append_kernel(
     eps_q, eps_k,
     NQ: tl.constexpr, NKV: tl.constexpr,
     D: tl.constexpr, HALF: tl.constexpr, BLOCK: tl.constexpr,
+    WRITE_KOUT: tl.constexpr,
 ):
+    """row = program_id(0)：decode 时是请求（pos 来自 lens），prefill 复用
+    时是打包 token 行（pos 传逐行位置张量，bt 传按行 gather 的块表）。
+    WRITE_KOUT：额外把 rope 后的 k 写到 KOut（prefill 的 attention 直连；
+    decode 不需要，constexpr 裁剪）。"""
     b = tl.program_id(0)
     h = tl.program_id(1)
     off_h = tl.arange(0, HALF)
@@ -52,15 +57,19 @@ def _qk_rope_append_kernel(
         rms_k = tl.rsqrt((tl.sum(k1 * k1) + tl.sum(k2 * k2)) / D + eps_k)
         k1 = k1 * rms_k * tl.load(KNW + off_h).to(tl.float32)
         k2 = k2 * rms_k * tl.load(KNW + HALF + off_h).to(tl.float32)
-
+        ok1 = (k1 * cos - k2 * sin)
+        ok2 = (k2 * cos + k1 * sin)
+        if WRITE_KOUT:
+            ko = KOut + (b * NKV + h) * D
+            tl.store(ko + off_h, ok1.to(KOut.dtype.element_ty))
+            tl.store(ko + HALF + off_h, ok2.to(KOut.dtype.element_ty))
         blk = tl.load(bt + b * s_bt_b
                       + (pos // BLOCK) * s_bt_s).to(tl.int64)
         blk = tl.maximum(blk, 0)          # -1 槽位钳到 dummy 块 0
         slot = pos % BLOCK
         kc = K_cache + blk * s_kc_blk + h * s_kc_h + slot * D
-        tl.store(kc + off_h, (k1 * cos - k2 * sin).to(K_cache.dtype.element_ty))
-        tl.store(kc + HALF + off_h,
-                 (k2 * cos + k1 * sin).to(K_cache.dtype.element_ty))
+        tl.store(kc + off_h, ok1.to(K_cache.dtype.element_ty))
+        tl.store(kc + HALF + off_h, ok2.to(K_cache.dtype.element_ty))
         vb = base + (NQ + NKV + h) * D
         vc = V_cache + blk * s_vc_blk + h * s_vc_h + slot * D
         tl.store(vc + off_h, tl.load(QKV + vb + off_h))
@@ -72,19 +81,26 @@ def fused_qk_rope_append(qkv: torch.Tensor, qnw: torch.Tensor,
                          starts: torch.Tensor, bt: torch.Tensor,
                          k_cache: torch.Tensor, v_cache: torch.Tensor,
                          block_size: int, layer_idx: int,
-                         n_heads: int, n_kv: int, eps: float = 1e-6
-                         ) -> torch.Tensor:
-    """qkv [B, nq*D + 2*nkv*D] 连续；starts/bt 为 GPU 张量。
-    返回 rope 后的 q [B, n_heads, D]（连续），k/v 已写入 cache。"""
+                         n_heads: int, n_kv: int, eps: float = 1e-6,
+                         want_k: bool = False):
+    """qkv [B, nq*D + 2*nkv*D] 连续；starts/bt 为 GPU 张量（行粒度：
+    B 个行各自的位置与块表行——decode 传请求，prefill 传打包 token 行）。
+    返回 rope 后的 q [B, n_heads, D]（连续）；k/v 已写入 cache。
+    want_k=True 时额外返回 rope 后的 k [B, n_kv, D]（prefill attention 用）。"""
     B = qkv.shape[0]
     D = qnw.numel()
     q_out = torch.empty(B, n_heads, D, dtype=qkv.dtype, device=qkv.device)
+    k_out = (torch.empty(B, n_kv, D, dtype=qkv.dtype, device=qkv.device)
+             if want_k else q_out)
     kc, vc = k_cache[layer_idx], v_cache[layer_idx]
     _qk_rope_append_kernel[(B, n_heads)](
-        qkv, qnw, knw, cos, sin, starts, bt, kc, vc, q_out,
+        qkv, qnw, knw, cos, sin, starts, bt, kc, vc, q_out, k_out,
         qkv.stride(0), cos.stride(0),
         bt.stride(0), bt.stride(1),
         kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1),
         eps, eps,
-        NQ=n_heads, NKV=n_kv, D=D, HALF=D // 2, BLOCK=block_size)
+        NQ=n_heads, NKV=n_kv, D=D, HALF=D // 2, BLOCK=block_size,
+        WRITE_KOUT=want_k)
+    if want_k:
+        return q_out, k_out
     return q_out

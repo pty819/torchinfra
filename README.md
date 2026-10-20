@@ -173,6 +173,25 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   有与我们 P6 同款的 `fuse_qk_norm_rope_kvcache` pass（方向印证）；
   SGLang 的 overlap 调度我们在 P6 已实现同构；两大引擎的下一个大
   杠杆是 n-gram/EAGLE 投机解码（无需量化、拒绝采样保持分布不变）。
+- [x] P9 — prefill 榨干（decode 贴带宽了，prefill 还远没有）
+  追问之下剖析（tools/profile_prefill.py）：prefill 是**计算**瓶颈，
+  77.3ms/416token ≈ 7 TFLOPS，其中 `_prefill_attn_kernel` 独占 74.7%——
+  初版把 q/k/v 全升 fp32 再 `tl.dot`，在 RDNA4 上不走 tensor core，
+  仅 ~0.3 TFLOPS。两步修复：
+  ① attention dot 改 bf16 原生输入 + fp32 累加（tensor core 路径），
+  47.8 → 1.3ms（单点 38x），差分不变（bf16 输入本来就是 bf16 值，
+  tensor core 乘积精确，累加同为 fp32）。
+  ② 每层 ~18 个 eager pointwise（qk-norm 的 float/pow/mean/rsqrt 链 +
+  rope 的 cat/mul + 打包 cache 写入）→ **复用 decode 的三合一 kernel**：
+  把 sum_S 当 batch 维、逐 token 位置当 lens、块表按行 gather，
+  `fused_qk_rope_append(..., want_k=True)` 一趟完成（kernel 加 constexpr
+  KOut 输出，decode 路径零改动）。
+  结果：B=32 批量 prefill **77 → 16.4ms（4.7x，~33.5 TFLOPS，贴近卡的
+  bf16 峰值）**；单条 prefill 50 → 8.7ms（TTFT）。端到端：B=32 5023 →
+  **5265 tok/s**，B=16 3208 → 3317，B=8 1738 → 1772，单流 220 → 223
+  （llama.cpp 的 104%）。至此 decode 贴实测带宽（420GB/s）、prefill 贴
+  实测算力（~34 TFLOPS），bf16 双瓶颈均到位。
+
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
 | 阶段 | 单流 tok/s | 并发 B=8 tok/s |
@@ -184,12 +203,13 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P5 批采样/记账/桶/投影融合 | 177 | 1208 |
 | P6 零同步 + kernel 融合 | 221 | 1493（B=16 2460，B=32 3405） |
 | P7 批量 prefill | 217 | 1707（B=16 3160，B=32 4980） |
-| **P8 加固（mark_static_address）** | **220** | **1738（B=16 3208，B=32 5023）** |
+| P8 加固（mark_static_address） | 220 | 1738（B=16 3208，B=32 5023） |
+| **P9 prefill 榨干（tensor core + 三合一复用）** | **223** | **1772（B=16 3317，B=32 5265）** |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
 | 实测带宽上限（纯读 420GB/s） | — | ~3400（B=8 等效） |
 
 （"理论上限"改用实测：标称 640GB/s 是纸面值，大块纯读实测 420GB/s，
-1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 5023 已显著
+1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 5265 已显著
 超过该"B=8 等效"值——批越大每 token 摊的权重读越薄，上限随 B 上移。）
 
 下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x）、

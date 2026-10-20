@@ -44,8 +44,10 @@ def _prefill_attn_kernel(Q, K, V, O, cu, sm_scale,
     offs_q = q0 + tl.arange(0, TQ)
     offs_d = tl.arange(0, D)
     qm = offs_q < S
+    # bf16 原生加载：tl.dot 输入 bf16 → tensor core，fp32 累加（P9 前
+    # 曾把 q/k/v 全升 fp32 再 dot，实测 0.3 TFLOPS，占 prefill 75%）
     q = tl.load(Q + (start + offs_q[:, None]) * s_q_r + h * s_q_h
-                + offs_d[None, :], mask=qm[:, None], other=0.0).to(tl.float32)
+                + offs_d[None, :], mask=qm[:, None], other=0.0)
 
     m_i = tl.full([TQ], -1.0e30, dtype=tl.float32)
     l_i = tl.zeros([TQ], dtype=tl.float32)
@@ -56,8 +58,8 @@ def _prefill_attn_kernel(Q, K, V, O, cu, sm_scale,
         offs_k = ks + tl.arange(0, TK)
         km = offs_k < S
         k = tl.load(K + (start + offs_k[:, None]) * s_k_r + kv_h * s_k_h
-                    + offs_d[None, :], mask=km[:, None], other=0.0).to(tl.float32)
-        qk = tl.dot(q, tl.trans(k)) * sm_scale
+                    + offs_d[None, :], mask=km[:, None], other=0.0)
+        qk = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * sm_scale
         mask = qm[:, None] & km[None, :] & (offs_q[:, None] >= offs_k[None, :])
         qk = tl.where(mask, qk, -1.0e30)
         m_new = tl.maximum(m_i, tl.max(qk, 1))
@@ -67,7 +69,7 @@ def _prefill_attn_kernel(Q, K, V, O, cu, sm_scale,
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None]
         v = tl.load(V + (start + offs_k[:, None]) * s_v_r + kv_h * s_v_h
-                    + offs_d[None, :], mask=km[:, None], other=0.0).to(tl.float32)
+                    + offs_d[None, :], mask=km[:, None], other=0.0)
         acc += tl.dot(p.to(v.dtype), v, out_dtype=tl.float32)
         m_i = m_new
 
@@ -152,9 +154,13 @@ def prefill_batch(model, paged, prompts: list[list[int]],
     pos = torch.arange(total, device=device) - cu[req_of_row]   # 每请求内位置
 
     cos, sin = model.rope.cos, model.rope.sin           # [max_pos, D] fp32
-    half = cos.shape[1] // 2
     bt = paged.block_table.index_select(0, torch.tensor(
         bt_rows, dtype=torch.long, device=device))
+    # 复用 decode 的三合一 kernel：行粒度传入逐 token 位置与按行 gather
+    # 的块表 → qk-norm + rope + cache 写入一趟（替代 ~18 个 eager pointwise）
+    from torchinfra.fused_decode import fused_qk_rope_append
+    pos32 = pos.to(torch.int32)
+    bt_rows_packed = paged.block_table.index_select(0, req_of_row)
     x = model.model.embed_tokens(flat)                  # [sum_S, E]
     for i, layer in enumerate(model.model.layers):
         h = layer.input_layernorm(x)
@@ -163,26 +169,19 @@ def prefill_batch(model, paged, prompts: list[list[int]],
             qkv = F.linear(h, attn.w_qkv)
             nq = attn.n_heads * attn.hd
             nk = attn.n_kv * attn.hd
-            q = qkv[:, :nq].view(total, attn.n_heads, attn.hd)
-            k = qkv[:, nq:nq + nk].view(total, attn.n_kv, attn.hd)
             v = qkv[:, nq + nk:].view(total, attn.n_kv, attn.hd)
         else:
-            q = attn.q_proj(h).view(total, attn.n_heads, attn.hd)
-            k = attn.k_proj(h).view(total, attn.n_kv, attn.hd)
-            v = attn.v_proj(h).view(total, attn.n_kv, attn.hd)
-        q = attn.q_norm(q)
-        k = attn.k_norm(k)
-        # RoPE（与 apply_qk 同式：cos/sin cast 到 q dtype 后半区旋转）
-        c = cos[pos, :half].to(q.dtype)[:, None, :]     # [sum_S, 1, half]
-        s = sin[pos, :half].to(q.dtype)[:, None, :]
-        q = torch.cat([q[..., :half] * c - q[..., half:] * s,
-                       q[..., half:] * c + q[..., :half] * s], dim=-1)
-        k = torch.cat([k[..., :half] * c - k[..., half:] * s,
-                       k[..., half:] * c + k[..., :half] * s], dim=-1)
+            qkv = torch.cat([attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)],
+                            dim=-1)
+            v = qkv[:, attn.n_heads * attn.hd + attn.n_kv * attn.hd:].view(
+                total, attn.n_kv, attn.hd)
+        q, k = fused_qk_rope_append(
+            qkv, attn.q_norm.weight, attn.k_norm.weight, cos, sin,
+            pos32, bt_rows_packed, paged.k, paged.v, paged.block_size, i,
+            attn.n_heads, attn.n_kv, attn.q_norm.eps, want_k=True)
 
-        out = prefill_attn(q.contiguous(), k.contiguous(), v.contiguous(),
+        out = prefill_attn(q, k, v.contiguous(),
                            cu, attn.n_kv)                # [sum_S, H, D]
-        append_prefill_kv(paged, k, v, bt, cu, i, max_s)
         x = x + attn.o_proj(out.reshape(total, attn.n_heads * attn.hd))
         x = x + mlp_forward(layer.post_attention_layernorm(x), layer.mlp)
     x = model.model.norm(x)
