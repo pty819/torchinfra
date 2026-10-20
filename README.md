@@ -186,11 +186,16 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   把 sum_S 当 batch 维、逐 token 位置当 lens、块表按行 gather，
   `fused_qk_rope_append(..., want_k=True)` 一趟完成（kernel 加 constexpr
   KOut 输出，decode 路径零改动）。
-  结果：B=32 批量 prefill **77 → 16.4ms（4.7x，~33.5 TFLOPS，贴近卡的
-  bf16 峰值）**；单条 prefill 50 → 8.7ms（TTFT）。端到端：B=32 5023 →
-  **5265 tok/s**，B=16 3208 → 3317，B=8 1738 → 1772，单流 220 → 223
-  （llama.cpp 的 104%）。至此 decode 贴实测带宽（420GB/s）、prefill 贴
-  实测算力（~34 TFLOPS），bf16 双瓶颈均到位。
+  结果：B=32 批量 prefill **77 → 16.4ms（4.7x）**；单条 prefill 50 →
+  8.7ms（TTFT）。端到端：B=32 5023 → **5265 tok/s**，B=16 3208 → 3317，
+  B=8 1738 → 1772，单流 220 → 223（llama.cpp 的 104%）。
+  **勘误（对照官方规格实测后修正）**：本卡为 12GB/192-bit 版，规格带宽
+  432GB/s——实测纯读 420 = **97%，decode 确实贴墙**。但算力没贴满：
+  规格矩阵 FP16 峰值 137 TFLOPS，实测方阵 GEMM 上限 ~104 TFLOPS；
+  prefill 端到端仅 22（M=416）~37（M≥1024）TFLOPS（GEMM 部分 ~39），
+  约为可达成算力的 1/3——**prefill 仍有 ~2.5x GEMM 效率空间**（M=8 时
+  输给 hipblas 的结论不适用于 M≥416 的计算型形状）。短 prompt 负载下
+  prefill 只占端到端 ~2% 故未继续追；长 prompt TTFT 场景值得回来挖。
 
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
@@ -206,11 +211,13 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 | P8 加固（mark_static_address） | 220 | 1738（B=16 3208，B=32 5023） |
 | **P9 prefill 榨干（tensor core + 三合一复用）** | **223** | **1772（B=16 3317，B=32 5265）** |
 | llama.cpp（同卡同模型 bf16，参照） | 213.4 | —（未测） |
-| 实测带宽上限（纯读 420GB/s） | — | ~3400（B=8 等效） |
+| 实测带宽上限（纯读 420 / 规格 432GB/s） | — | ~3400（B=8 等效） |
 
 （"理论上限"改用实测：标称 640GB/s 是纸面值，大块纯读实测 420GB/s，
-1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限。B=32 的 5265 已显著
-超过该"B=8 等效"值——批越大每 token 摊的权重读越薄，上限随 B 上移。）
+1.19GB 权重 + 0.31GB lm_head → 每步 ~3.6ms 下限（实测纯读 420GB/s =
+规格 432 的 97%，decode 贴墙）。B=32 的 5265 已显著超过该"B=8 等效"
+值——批越大每 token 摊的权重读越薄，上限随 B 上移。算力侧（勘误后）：
+规格矩阵峰值 137、方阵实测 ~104，prefill 端到端 22-37——未贴满。）
 
 下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
 投机解码、chunked prefill（长 prompt 分片防独占）、prefill 编译兼容。
