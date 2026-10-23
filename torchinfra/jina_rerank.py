@@ -32,7 +32,7 @@ from torchinfra.fp8_linear import quantize_weight, fp8_linear, fp8_linear_q
 
 @triton.jit
 def _window_attn_kernel(
-    Q, K, V, O, PAD, sm, S,
+    Q, K, V, O, PART, PAD, sm, S,
     NQ_PER_KV: tl.constexpr, D: tl.constexpr,
     TQ: tl.constexpr, TK: tl.constexpr, WINDOW: tl.constexpr,
 ):
@@ -42,6 +42,8 @@ def _window_attn_kernel(
     长度。输出 O 直接按 [B, S, H*D] 行主序写，滑窗层免去 transpose+contiguous
     拷贝。K 循环按满块条件切三段：窗内侧段只需窗掩码、中段整块免掩码、
     近对角段只需因果掩码——免掩码段省掉 [TQ,TK] 的 where/比较群。
+    PART 顺带写每个 [TQ,D] tile 的 amax（bf16 舍入后值，fp8 量化融合用，
+    [B, H, cdiv(S,TQ)] fp32；掩码行记 0，不污染全局 amax）。
     """
     b = tl.program_id(0)
     h = tl.program_id(1)
@@ -125,8 +127,42 @@ def _window_attn_kernel(
                     mask=km[:, None], other=0.0)
         acc += tl.dot(p.to(v.dtype), v, out_dtype=tl.float32)
         m_i = m_new
+    ob = (acc / l_i[:, None]).to(O.dtype.element_ty)
     tl.store(O + (b * S + offs_q[:, None]) * (H * D) + h * D + offs_d[None, :],
-             (acc / l_i[:, None]).to(O.dtype.element_ty), mask=qm[:, None])
+             ob, mask=qm[:, None])
+    # tile amax：掩码行（左侧 padding / 末 tile 越界）记 0；l_i=0 的全掩码
+    # tile 会得 NaN，必须 where 掉再归约
+    obz = tl.where(qm[:, None], ob.to(tl.float32), 0.0)
+    nt = tl.cdiv(S, TQ)
+    tl.store(PART + (b * H + h) * nt + t, tl.max(tl.abs(obz)))
+
+
+@triton.jit
+def _transpose_amax_kernel(IN, OUT, PART, S, H: tl.constexpr,
+                           D: tl.constexpr, BLOCK: tl.constexpr):
+    """SDPA 输出 [B, H, S, D] → [B*S, H*D] 行主序 bf16 + 每行 amax partial。
+
+    替代 transpose+contiguous 拷贝与独立 _row_amax：一趟读完，写转置结果
+    并顺带吐 fp8 量化要的逐行 amax（bf16 舍入后值，bit-exact）。"""
+    bs = tl.program_id(0)
+    b = bs // S
+    s = bs % S
+    offs = tl.arange(0, BLOCK)
+    h = offs // D
+    d = offs % D
+    v = tl.load(IN + ((b * H + h) * S + s) * D + d)
+    tl.store(OUT + bs * BLOCK + offs, v)
+    tl.store(PART + bs, tl.max(tl.abs(v.to(tl.float32))))
+
+
+def transpose_amax(out: torch.Tensor):
+    """out [B, H, S, D] 连续 → ([B, S, H*D] bf16, partial [B*S] fp32)。"""
+    B, H, S, D = out.shape
+    flat = torch.empty(B * S, H * D, dtype=out.dtype, device=out.device)
+    part = torch.empty(B * S, device=out.device, dtype=torch.float32)
+    _transpose_amax_kernel[(B * S,)](out, flat, part, S, H=H, D=D,
+                                     BLOCK=H * D, num_warps=8)
+    return flat.view(B, S, H * D), part
 
 
 DOC_ID = 151670
@@ -474,22 +510,27 @@ class JinaReranker:
             sliding = self.layer_types[i] == "sliding_attention" and S > WINDOW
             if sliding:
                 out = torch.empty(B, S, nq, dtype=q.dtype, device=q.device)
-                _window_attn_kernel[(B, attn.n_heads, triton.cdiv(S, WIN_TQ))](
-                    q, k, v, out, pad, attn.hd ** -0.5, S,
+                nt = triton.cdiv(S, WIN_TQ)
+                apart = torch.empty(B, attn.n_heads, nt, dtype=torch.float32,
+                                    device=q.device)
+                _window_attn_kernel[(B, attn.n_heads, nt)](
+                    q, k, v, out, apart, pad, attn.hd ** -0.5, S,
                     NQ_PER_KV=attn.n_heads // attn.n_kv, D=attn.hd,
                     TQ=WIN_TQ, TK=WIN_TK, WINDOW=WINDOW,
                     num_warps=WIN_WARPS, num_stages=WIN_STAGES)
                 attn_out = out  # 已是 [B, S, H*D] 行主序
+                attn_partial = apart
             elif padded:
                 out = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=causal_mask, enable_gqa=True)
-                attn_out = out.transpose(1, 2).reshape(B, S, -1).contiguous()
+                attn_out, attn_partial = transpose_amax(out)
             else:
                 out = F.scaled_dot_product_attention(
                     q, k, v, is_causal=True, enable_gqa=True)
-                attn_out = out.transpose(1, 2).reshape(B, S, -1).contiguous()
+                attn_out, attn_partial = transpose_amax(out)
             if self.fp8:
-                x = x + fp8_linear(attn_out, attn.o_w_fp8, attn.o_w_s)
+                x = x + fp8_linear_q(attn_out, attn.o_w_fp8, attn.o_w_s,
+                                     attn_partial)
                 h2, ph2 = triton_rmsnorm_amax(
                     x, layer.post_attention_layernorm.weight, eps)
                 gu = fp8_linear_q(h2, layer.mlp.w_gu_fp8, layer.mlp.w_gu_s, ph2)

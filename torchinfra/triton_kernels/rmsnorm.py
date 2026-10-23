@@ -31,18 +31,15 @@ def _rmsnorm_kernel(x_ptr, w_ptr, out_ptr, stride, N, eps,
                  mask=mask)
 
 
-@triton.autotune(
-    configs=[triton.Config({"BLOCK": b}, num_warps=w)
-             for b in (1024, 2048) for w in (4, 8)],
-    key=["N"],
-)
 @triton.jit
 def _rmsnorm_amax_kernel(x_ptr, w_ptr, out_ptr, part_ptr, stride, N, eps,
                          BLOCK: tl.constexpr):
     """rmsnorm + 顺带写每行 amax partial（fp8 融合量化用）。
 
     amax 取 bf16 舍入后的值（即后续量化 kernel 读回的同一 bit pattern），
-    与单独跑 _row_amax 的结果 bit-exact 一致。"""
+    与单独跑 _row_amax 的结果 bit-exact 一致。配置锁死（无 autotune）：
+    BLOCK 影响归约树，autotune 按耗时选配置会让输出随计时噪声漂移
+    （最后一次 ulp），bit-exact 路径不能有这个自由度。N=1024 时单次迭代。"""
     row = tl.program_id(0)
     base = row * stride
     acc = tl.zeros([BLOCK], dtype=tl.float32)
@@ -72,7 +69,10 @@ def triton_rmsnorm_amax(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6):
     out = torch.empty_like(x2)
     part = torch.empty(x2.shape[0], device=x.device, dtype=torch.float32)
     _rmsnorm_amax_kernel[(x2.shape[0],)](x2, w, out, part, out.stride(0),
-                                         shape[-1], eps)
+                                         shape[-1], eps,
+                                         BLOCK=min(max(triton.next_power_of_2(
+                                             shape[-1]), 16), 1024),
+                                         num_warps=4)
     return out.view(shape), part
 
 

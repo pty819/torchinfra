@@ -299,28 +299,38 @@ kernel 数；200×512 的 CPU 侧（plan+encode ~196ms）仅占 3%，不构成�
 
 下一步杠杆（引擎侧，按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
 投机解码、chunked prefill（长 prompt 分片防独占）、prefill 编译兼容。
-rerank 侧：o_proj 输出 transpose 的 GEMM 端消拷贝（滑窗层已直写行主序，
-剩 12 个全注意力层的 transpose+quant 可再融合）。
+rerank 侧：fp8 量化链已融合到位（P12，生产者全部直吐 amax partial），
+剩余结构性杠杆是权重 int4/int8 与注意力 fp8，均属大改。
 
 **P12 — fp8 量化融合进生产者 kernel（2026-10-24）**：tensorwise 量化的
 两阶段（先 amax 后 quant）没法一遍出 fp8，但 amax 那趟全量读可以白拿——
 `_rmsnorm_amax_kernel` / `_silu_mul_amax_kernel` 在写 bf16 输出的同一趟
 里把每行 amax 顺带写进 [M] fp32 partial（值本来就在寄存器里），新增
 `fp8_linear_q(partial)` 跳过独立 `_row_amax` kernel，每层省 3 launch + 3 趟
-激活读（down 输入 [27K,3072] 一趟就是 167MB）。**数值 bit-exact**：partial
-用 bf16 舍入后的值算，与旧路径读回的是同一 bit pattern
-（tools/test_fused_quant_parity.py 全 0 diff，含 fp8 q 逐位与 GEMM 输出）。
-e2e（同 bench）：8×64 15.2→14.5ms、32×256 200→195、100×256 995→978、
-20×512 259→254.5、200×512 6172→6103（-69ms，与省掉的 amax 读流量估算
-吻合）；kernel 数 ~620→578/前向。**门禁翻新**：test_graph_path 原来拿
-随机 id 对拍 graph vs eager，fp8 下跨桶 M 命中不同 GEMM 算法档（~3e-3/层
-被病态激活放大到 ~1e-1，TunableOp CSV 追加调优行也会让结果漂移）——
-干净 HEAD 同样挂，属门禁误设计而非图错误。改为两层：桶精确 S 必须
-bit-exact（真正的捕获 bug 检测器，S=256/1024/4096/8192 全 0），跨桶真实
-文本只约束投影归一化后的分数空间（<0.02，实测 ~0.008）。**负结果**：
-rowwise scale（一行一 scale，生产者可一遍出 fp8）在 `_scaled_mm` 上慢
-20-35%（141→117 TF @M=27K，M=767 时 135→100），融合方案判死、走
-tensorwise+partial（tools/bench_smm_scaling.py）。
+激活读（down 输入 [27K,3072] 一趟就是 167MB）。第二轮把 o_proj 输入也收掉：
+SDPA 输出的 transpose+contiguous 拷贝与 amax 合成 `_transpose_amax_kernel`
+（转置同趟吐行 amax），滑窗 kernel 写 out 同趟吐 tile amax partial
+（掩码行记 0；全掩码 tile 的 acc/l_i=NaN 必须 where 掉再归约）。两轮后
+`_row_amax` 调用归零。**数值**：partial 一律取 bf16 舍入后的值（量化
+kernel 读回的同一 bit pattern），amax 与归约顺序无关 → partial 与全量
+行 amax 逐位一致、q 逐位一致（tools/test_fused_quant_parity.py 全 0，
+含 transpose_amax、滑窗 partial、左 padding 组）。e2e（同 bench，两轮
+累计 vs P11）：8×64 15.2→14.4ms、32×256 200→194.1、100×256 995→973、
+20×512 259→252.2、200×512 6172→6075（-28ms，与每层省一趟 attn_out
+全量读 55.6MB@27K 的估算吻合）。**踩坑**：`_rmsnorm_amax_kernel` 首版
+抄了 `@triton.autotune`——BLOCK 影响平方和归约树，autotune 按计时选
+配置会让输出随噪声漂移最后一位 ulp（微验证两个 M 档 q 差 2 位暴露），
+bit-exact 关键 kernel 必须**锁死配置**（N=1024 单次迭代，BLOCK=1024/w4）。
+**门禁翻新**：test_graph_path 原来拿随机 id 对拍 graph vs eager，fp8 下
+跨桶 M 命中不同 GEMM 算法档（~3e-3/层被病态激活放大到 ~1e-1，TunableOp
+CSV 追加调优行也会让结果漂移）——干净 HEAD 同样挂，属门禁误设计而非
+图错误。改为两层：桶精确 S 必须 bit-exact（真正的捕获 bug 检测器，
+S=256/1024/4096/8192 全 0），跨桶真实文本只约束投影归一化后的分数空间
+（<0.02，实测 ~0.008）。**负结果**：rowwise scale（一行一 scale，生产者
+可一遍出 fp8）在 `_scaled_mm` 上慢 20-35%（141→117 TF @M=27K，M=767 时
+135→100），融合方案判死、走 tensorwise+partial（tools/bench_smm_scaling.py）。
+另：CUPTI 在此栈上丢事件严重（CUDA 侧 kernel 计数不可信），kernel 数
+主张只报结构性事实（_row_amax 28→0/前向），量化收益以 e2e 为准。
 
 **torch.compile 负结果（2026-10-23 实测，tools/bench_compile_rerank.py）**：
 对 reranker 前向直接 compile 不可用——S=767 能编译但**慢于 eager**
