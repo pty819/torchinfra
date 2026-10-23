@@ -6,7 +6,8 @@
     {"model": "...", "query": "...", "documents": ["..."], "top_n": 3}
 
 GPU 上只有调度线程会跑前向。HTTP 线程把请求放进队列，等一小段时间把同时到达的
-请求收成一批，再按 max_batch 条 prompt 左 padding 后一次算完。
+请求收成一批；块按真实 token 长度分组——小块相近长度左 padding 拼批，大块只与
+等长块拼（保 flash 路径）否则单独前向（详见 RerankScheduler._run）。
 """
 from __future__ import annotations
 
@@ -75,7 +76,16 @@ class RerankScheduler:
     @torch.no_grad()
     def _run(self, batch) -> None:
         """batch: [(query, documents, top_n, future)]。每条请求先按官方规则切块，
-        再把所有块按 max_batch 拼成若干次前向。"""
+        逐块编码拿真实 token 长度，再按长度分批前向：
+
+        - 小块（≤512 tok）与长度相近的块左 padding 拼批（浪费小，
+          attn_mask 后端在这个尺寸也便宜）；
+        - 大块只与**等长**块拼（无 padding → is_causal flash 路径），
+          否则单独 B=1 前向（吃 CUDA graph 分桶）。
+
+        异长左 padding 在大 S 下是双重毒药：小块被撑到大块长度白算十几倍，
+        且 padded 批的 SDPA 走 attn_mask 后端、物化 B×H×S² 注意力矩阵
+        （掉出 flash）——B=2、S≈2900 实测慢 7 倍，更大 S 直接 OOM。"""
         reranker = self.reranker
         jobs = []
         for query, documents, top_n, fut in batch:
@@ -83,30 +93,52 @@ class RerankScheduler:
                 fut.set_result(([], 0))
                 continue
             query_t, blocks = reranker.plan_blocks(query, documents)
+            nb = len(blocks)
             jobs.append({
                 "fut": fut, "query": query_t, "blocks": blocks,
                 "documents": documents, "top_n": top_n,
-                "docs": [], "queries": [], "weights": [], "tokens": 0,
+                "docs": [None] * nb, "queries": [None] * nb,
+                "weights": [None] * nb, "tokens": 0,
             })
-        pending = [(j, block) for j in jobs for block in j["blocks"]]
-        while pending:
-            chunk = pending[:self.max_batch]
-            pending = pending[self.max_batch:]
-            prompts = [_format_prompt(job["query"], block, None, reranker.tok)
-                       for job, block in chunk]
+        # 两遍编码：先逐条拿真实 token 长度（fast tokenizer，ms 级）
+        items = []
+        for job in jobs:
+            for bidx, block in enumerate(job["blocks"]):
+                prompt = _format_prompt(job["query"], block, None, reranker.tok)
+                n = len(reranker.tok(prompt)["input_ids"])
+                items.append((n, prompt, job, bidx))
+        items.sort(key=lambda x: x[0])
+        runs, i = [], 0
+        while i < len(items):
+            j = i + 1
+            if items[i][0] <= 512:
+                while (j < len(items) and items[j][0] <= 512
+                       and items[j][0] <= items[i][0] * 1.25 + 64
+                       and j - i < self.max_batch):
+                    j += 1
+            else:  # 大块：只拼完全等长的（编码后无 padding）
+                while (j < len(items) and items[j][0] == items[i][0]
+                       and j - i < self.max_batch):
+                    j += 1
+            runs.append(items[i:j])
+            i = j
+        for run in runs:
+            prompts = [p for _, p, _, _ in run]
             encoded = reranker.tok(prompts, padding=True, return_tensors="pt")
             ids = encoded.input_ids.to("cuda")
-            valid = encoded.attention_mask.bool().to("cuda")
-            # CPU 侧判定是否有 padding：避免前向里 GPU→CPU 同步
-            padded = not bool(encoded.attention_mask.all())
+            am = encoded.attention_mask
+            # 单块走 valid=None：embed_batch 对 B=1 启用 CUDA graph 分桶
+            valid = am.bool().to("cuda") if len(run) > 1 else None
+            padded = not bool(am.all())
             rows = reranker.embed_batch(ids, valid, padded)
             self.forwards += 1
-            for i, ((job, _), (doc, qry)) in enumerate(zip(chunk, rows)):
+            for k, ((_, _, job, bidx), (doc, qry)) in enumerate(zip(run, rows)):
                 scores = F.cosine_similarity(doc, qry.expand_as(doc), dim=-1)
-                job["docs"].append(doc)
-                job["queries"].append(qry)
-                job["weights"].append(float(((1.0 + scores) / 2.0).max()))
-                job["tokens"] += int(valid[i].sum())
+                job["docs"][bidx] = doc
+                job["queries"][bidx] = qry
+                job["weights"][bidx] = float(((1.0 + scores) / 2.0).max())
+                job["tokens"] += (int(valid[k].sum()) if valid is not None
+                                  else int(am[0].sum()))
         for job in jobs:
             if job["fut"].done():
                 continue

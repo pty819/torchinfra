@@ -350,8 +350,19 @@ S=256/1024/4096/8192 全 0），跨桶真实文本只约束投影归一化后的
 
 documents 也接受 `[{"text": "..."}]`；>125 篇自动分块加权合并；并发请求由
 调度器拼批（`--max-batch`/`--coalesce-ms`，GPU 只有调度线程跑前向）。
-已实测：本机/局域网 IP（0.0.0.0 绑定）、130 篇多块 0.86s、8 并发全 200。
-注意无鉴权，暴露到局域网（含 tailscale 侧）需自行加防火墙规则。
+**拼批按真实 token 长度分组**（rerank_server._run 两遍编码）：小块（≤512）
+相近长度左 padding 拼批；大块只与等长块拼（无 padding 保 flash/is_causal
+路径），否则单独 B=1 前向吃 CUDA graph 分桶——异长左 padding 在大 S 下
+是双重毒药：小块被撑到大块长度白算十几倍，且 padded 批的 SDPA 掉出
+flash、物化 B×H×S² 注意力矩阵（B=2、S≈2900 实测慢 7 倍，更大 S 直接
+OOM；修复前 130 篇 453ms → 修复后 64ms）。
+
+实测热态吞吐（fp8，含 HTTP/调度，0.0.0.0 绑定下局域网 IP 直打）：单请求
+100 篇（2.2K tok）47ms ≈ **48K tok/s**；130 篇多块（3K tok）64ms ≈
+**46K tok/s**；8 并发小请求 27-36ms/批 ≈ **45-60K tok/s**；混合
+（2×130 篇 + 2×100 篇 + 4 小）212ms ≈ **52K tok/s**。首请求含 Triton JIT
+与各长度桶的图捕获（首轮慢 3-10 倍属正常）。注意无鉴权，暴露到局域网
+（含 tailscale 侧）需自行加防火墙规则。
 
 **torch.compile 负结果（2026-10-23 实测，tools/bench_compile_rerank.py）**：
 对 reranker 前向直接 compile 不可用——S=767 能编译但**慢于 eager**
