@@ -302,3 +302,12 @@ kernel 数；200×512 的 CPU 侧（plan+encode ~196ms）仅占 3%，不构成�
 rerank 侧：fp8 量化的 amax/quant 融合进 rmsnorm/silu 生产者（减 ~220
 kernel/前向）、o_proj 输出 transpose 的 GEMM 端消拷贝。
 
+**torch.compile 负结果（2026-10-23 实测，tools/bench_compile_rerank.py）**：
+对 reranker 前向直接 compile 不可用——S=767 能编译但**慢于 eager**
+（15.3 vs 13.9ms，0.91x）且**数值错**（hidden 相对误差 9.2e-2，P8
+_fused_kernel 深层链翻转 bug 同款现象，长链触发、对拍拦截）；S=8782
+直接编译失败（Inductor 子进程无法 build 被 dynamo 追踪的
+`_window_attn_kernel`，三段循环的运行期边界过不了它的 Triton codegen）。
+结论：该前向的 kernel 数问题只能靠手工融合（同 P8 的 custom-op 边界
+哲学），compile 路线在此栈（gfx1201 + 裸 triton kernel + fp8）判死。
+
