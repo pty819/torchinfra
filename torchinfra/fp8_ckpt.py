@@ -1,0 +1,134 @@
+"""把 bf16 checkpoint 收成混合精度：Linear 权重 E4M3 + 每矩阵一个 scale，其余保持 bf16。
+
+E4M3 只能表示到 ±448，所以每个权重矩阵要存一个 fp32 scale，
+weight_q = round(weight / scale)。这是存盘格式，不是运行时再搜 scale。
+embedding、RMSNorm、q/k norm、projector 不动。
+"""
+from pathlib import Path
+import json
+import shutil
+import torch
+from safetensors.torch import load_file, save_file
+
+from torchinfra.fp8_linear import FP8_MAX
+
+_QUANT_SUFFIX = (
+    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+    "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+)
+_COPY = (
+    "config.json", "generation_config.json", "tokenizer.json",
+    "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json",
+    "vocab.json", "merges.txt",
+)
+
+
+def is_fp8_checkpoint(model_dir: str | Path) -> bool:
+    cfg = Path(model_dir) / "config.json"
+    if not cfg.is_file():
+        return False
+    raw = json.loads(cfg.read_text())
+    return raw.get("quantization_config", {}).get("quant_method") == "fp8"
+
+
+def _quantize_tensor(w: torch.Tensor):
+    s = (w.float().abs().amax() / FP8_MAX).clamp(min=1e-12).reshape(1).float()
+    q = (w.float() / s).to(torch.float8_e4m3fn).contiguous()
+    return q, s
+
+
+def _put(out: dict, key: str, w: torch.Tensor, scale: torch.Tensor | None = None):
+    """key 以 .weight 结尾。scale 给定时不再单独算（用于 q/k/v 共用一个 scale）。"""
+    if scale is None:
+        q, scale = _quantize_tensor(w)
+    else:
+        q = (w.float() / scale).to(torch.float8_e4m3fn).contiguous()
+    out[key] = q
+    out[key[: -len("weight")] + "weight_scale"] = scale.reshape(1).contiguous().clone()
+
+
+def save_fp8_checkpoint(src: str | Path, dst: str | Path) -> Path:
+    """src 是原始 bf16 目录，dst 写成混合 fp8 checkpoint。
+
+    Q/K/V 共用一个 scale，gate/up 共用一个 scale，这样加载后可以拼回一次 GEMM，
+    而且拼回去的字节就是文件里的字节，不会再量化第二次。
+    """
+    src, dst = Path(src), Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    sd = load_file(str(src / "model.safetensors"))
+    out = {}
+    n_fp8 = 0
+    layers = sorted({k.split(".self_attn.")[0] for k in sd if ".self_attn.q_proj.weight" in k})
+    for layer in layers:
+        a = f"{layer}.self_attn"
+        fused_qkv = torch.cat([sd[f"{a}.q_proj.weight"], sd[f"{a}.k_proj.weight"],
+                               sd[f"{a}.v_proj.weight"]], dim=0)
+        q, s = _quantize_tensor(fused_qkv)
+        nq, nk = sd[f"{a}.q_proj.weight"].shape[0], sd[f"{a}.k_proj.weight"].shape[0]
+        _put(out, f"{a}.q_proj.weight", sd[f"{a}.q_proj.weight"], s)
+        _put(out, f"{a}.k_proj.weight", sd[f"{a}.k_proj.weight"], s)
+        _put(out, f"{a}.v_proj.weight", sd[f"{a}.v_proj.weight"], s)
+        # 上面三次各自又量化了一次。改成直接切已经量化好的 fused，避免和 s 再除一次。
+        out[f"{a}.q_proj.weight"] = q[:nq].contiguous().clone()
+        out[f"{a}.k_proj.weight"] = q[nq:nq + nk].contiguous().clone()
+        out[f"{a}.v_proj.weight"] = q[nq + nk:].contiguous().clone()
+        _put(out, f"{a}.o_proj.weight", sd[f"{a}.o_proj.weight"])
+        m = f"{layer}.mlp"
+        fused_gu = torch.cat([sd[f"{m}.gate_proj.weight"], sd[f"{m}.up_proj.weight"]], dim=0)
+        gq, gs = _quantize_tensor(fused_gu)
+        ng = sd[f"{m}.gate_proj.weight"].shape[0]
+        _put(out, f"{m}.gate_proj.weight", sd[f"{m}.gate_proj.weight"], gs)
+        _put(out, f"{m}.up_proj.weight", sd[f"{m}.up_proj.weight"], gs)
+        out[f"{m}.gate_proj.weight"] = gq[:ng].contiguous().clone()
+        out[f"{m}.up_proj.weight"] = gq[ng:].contiguous().clone()
+        _put(out, f"{m}.down_proj.weight", sd[f"{m}.down_proj.weight"])
+        n_fp8 += 7
+    for k, v in sd.items():
+        if k not in out and not k.endswith(_QUANT_SUFFIX):
+            out[k] = v
+    save_file(out, str(dst / "model.safetensors"))
+    raw = json.loads((src / "config.json").read_text())
+    raw["quantization_config"] = {
+        "quant_method": "fp8",
+        "fmt": "float8_e4m3fn",
+        "weight_scale": "tensor",
+        "activation_scheme": "dynamic",
+        "ignored": ["embed_tokens", "lm_head", "projector", "norm",
+                    "q_norm", "k_norm"],
+        "n_fp8_tensors": n_fp8,
+    }
+    (dst / "config.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+    for name in _COPY:
+        if name == "config.json":
+            continue
+        f = src / name
+        if f.is_file():
+            shutil.copy2(f, dst / name)
+    return dst
+
+
+def load_fp8_checkpoint(model_dir: str | Path, device: str = "cuda"):
+    """返回 (bf16 状态字典, fp8 权重)。
+
+    fp8 字典的值是 (e4m3 张量, scale [1])，key 与原始 `.weight` 相同。
+    bf16 字典里的 Linear 只是用 scale 还原出来给 load_state_dict 占位，
+    真正的 GEMM 用 fp8 那份，不再量化第二次。
+    """
+    model_dir = Path(model_dir)
+    sd = {}
+    for f in sorted(model_dir.glob("*.safetensors")):
+        sd.update(load_file(str(f)))
+    bf16, fp8 = {}, {}
+    for k, v in sd.items():
+        if k.endswith(".weight_scale"):
+            continue
+        if v.dtype == torch.float8_e4m3fn:
+            scale = sd[k[: -len("weight")] + "weight_scale"].to(device=device).reshape(1)
+            q = v.to(device=device).contiguous()
+            fp8[k] = (q, scale)
+            bf16[k] = (q.float() * scale).to(torch.bfloat16)
+        else:
+            bf16[k] = v.to(device=device, dtype=torch.bfloat16)
+    if "lm_head.weight" not in bf16:
+        bf16["lm_head.weight"] = bf16["model.embed_tokens.weight"]
+    return bf16, fp8

@@ -243,6 +243,62 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 值——批越大每 token 摊的权重读越薄，上限随 B 上移。算力侧（勘误后）：
 规格矩阵峰值 137、方阵实测 ~104，prefill 端到端 22-37——未贴满。）
 
-下一步杠杆（按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
+## P11 — jina-reranker-v3.5 重排路径（Qwen3-0.6B 骨干 + 混合滑窗 + FP8）
+
+jina-reranker-v3.5 = Qwen3-0.6B 骨干 + 16/28 层滑窗注意力 + projector 余弦打分。
+`torchinfra/jina_rerank.py` 在引擎之上自研前向（注意力走 SDPA / 自研滑窗 kernel，
+norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`rerank_server.py`
+提供 vLLM 风格 `/v1/rerank` 并发服务（调度器多请求块拼批）。对拍
+（`tests/test_jina_rerank.py`，vs 官方 HF forward）：分数误差 < 0.005。
+
+本轮 e2e 压延迟（tools/bench_rerank_e2e.py，5 档负载，fp8）：
+
+| 负载 | 基线 e2e | 本轮 | 变化 |
+|---|---|---|---|
+| 8×64 文档（S=767） | 16.3 ms | 15.2 ms | -7% |
+| 32×256（S=8.8K） | 230 ms | 200 ms | -13% |
+| 100×256（S=27.1K） | 1098 ms | 995 ms | -9% |
+| 20×512（S=10.7K） | 296 ms | 259 ms | -12% |
+| 200×512（S=105.5K/2块） | 6572 ms | 6172 ms | -6% |
+
+四项改动与三个负结果/踩坑（全部实录）：
+
+1. **修复 >32K 序列 GPU 页错误**：`plan_blocks` 按 tokenizer.model_max_length
+   （131072）切块，但 RoPE 表曾被硬限 32768——超长块越界读 cos/sin 表直接
+   `HSA_STATUS_ERROR_MEMORY_FAULT`（队列死、进程挂）。表放宽到
+   cfg.max_position_embeddings（~134MB），另加显式长度守卫。
+2. **滑窗注意力 kernel 重写**（三段式 FA2 循环切分 + [B,S,H*D] 直写）：
+   远端段只保留窗掩码、中段满块免掩码、近对角段只保留因果掩码，输出直写
+   行主序省掉滑窗层的 transpose+contiguous。S=27K 单层 8.12→4.01ms
+   （57 TFLOPS，2x）。**踩坑**：首版三段边界用理想区间值，段 2 末块越过界、
+   段 3 从界值起步 → 重叠 k 双计（对拍差 0.06 暴露）；改为三段共用锚定
+   start 的 TK 网格后对拍干净（含 B=2 左 padding、S 跨 1024/2048 边界组）。
+   配置扫描（tools/bench_window_cfg.py）：64/64/w4/st1 最优，st2/大 tile
+   在 gfx1201 上慢 2x（与 P6 结论一致）。
+3. **qk-norm+RoPE kernel 兼写 v**：v 原为 qkv 切片后 permute+contiguous
+   （每层一次 transpose 型拷贝，~170GB/s）；改为在三合一 kernel 里顺带搬运
+   （WANT_V），实测 kernel 总耗时不变（带宽有余量），每层净省 ~0.7ms@S=27K
+   + 28 次 launch。TR=16/w8 略优。**插曲**：扫描脚本的 torch 参考把
+   RMSNorm 分母写成 64（(a²+b²) 逐元素相加后 mean(-1)），一度冤枉 kernel
+   错 √2——新旧 kernel 逐位一致，手算才定位是参考错。
+4. **整前向 CUDA Graph 分桶捕获（≤8192）**：右 padding + 静态 buffer 懒捕获
+   （tools/test_graph_path.py 对拍）。两个坑：① `bool(valid.all())` 主机同步
+   会使捕获直接作废（也挡 eager 流水）——改为调用方 CPU 侧判定传入；
+   ② **右 padding 行不清零会污染 tensorwise fp8 量化的 amax**（pad 行激活
+   改变整批 scale）——图内嵌入后按 rowmask 清零，零行对 amax 无贡献且
+   逐行算子下恒为零。真实文本下图 vs eager **逐位一致**；随机 id 会放大
+   跨 GEMM 算法档的 ~3e-3 舍入差（病态激活下两层放大到 64，真实负载无此
+   现象）。**负结果（诚实记录）**：纯 replay 13.3ms ≈ eager 13.8ms@S=767
+   ——小 S 档的瓶颈不是 CPU launch 而是 GPU 侧 kernel 派发间隔（~620 个
+   kernel × ~8µs，图消不掉），下一步杠杆是减 kernel 数（量化 amax/quant
+   融合进 rmsnorm/silu 生产者）而非图。
+
+大 S 档（>27K 单块）前向里全注意力 SDPA(flyc) 占 ~50% 且已贴该 kernel
+天花板（~67 TFLOPS），滑窗层优化后剩余空间在 GEMM（fp8 ~107 TFLOPS）与
+kernel 数；200×512 的 CPU 侧（plan+encode ~196ms）仅占 3%，不构成瓶颈。
+
+下一步杠杆（引擎侧，按预期收益）：权重量化 int4/int8（权重读减 2-4x）、
 投机解码、chunked prefill（长 prompt 分片防独占）、prefill 编译兼容。
+rerank 侧：fp8 量化的 amax/quant 融合进 rmsnorm/silu 生产者（减 ~220
+kernel/前向）、o_proj 输出 transpose 的 GEMM 端消拷贝。
 
