@@ -54,6 +54,34 @@ def quantize_weight(w: torch.Tensor):
     return q, s
 
 
+def quantize_from_partial(x: torch.Tensor, partial: torch.Tensor):
+    """配合生产者 kernel 吐出的每行 amax partial：跳过全量 _row_amax 读。
+
+    x [M, K] 连续，partial [M] 为 x 的逐行 amax（bf16 舍入后值）。
+    返回与 quantize_tensorwise bit-exact 相同的 (q, scale)。"""
+    m, k = x.shape
+    scale = (partial.amax() / FP8_MAX).clamp(min=1e-12)
+    q = torch.empty(m, k, device=x.device, dtype=torch.float8_e4m3fn)
+    block = 1024 if k <= 1024 else 2048 if k <= 2048 else 4096
+    _quant_e4m3[(m,)](x, q, scale, x.stride(0), k, BLOCK=block, num_warps=4)
+    return q, scale.reshape(1)
+
+
+def fp8_linear_q(x: torch.Tensor, w_fp8: torch.Tensor, w_scale: torch.Tensor,
+                 partial: torch.Tensor) -> torch.Tensor:
+    """fp8_linear 的融合版：激活的 amax 由生产者 kernel 顺带算好。
+
+    partial 必须是 x 展平成 [-1, K] 后每行的 amax。"""
+    lead, k = x.shape[:-1], x.shape[-1]
+    flat = x.reshape(-1, k).contiguous()
+    q, scale = quantize_from_partial(flat, partial)
+    y = torch._scaled_mm(q, w_fp8.T, scale_a=scale, scale_b=w_scale.reshape(1),
+                         out_dtype=torch.bfloat16)
+    if isinstance(y, tuple):
+        y = y[0]
+    return y.view(*lead, w_fp8.shape[0])
+
+
 def fp8_linear(x: torch.Tensor, w_fp8: torch.Tensor, w_scale: torch.Tensor
                ) -> torch.Tensor:
     """x [..., K] → [..., N] bf16。w_fp8 为 [N, K] 行主序。"""

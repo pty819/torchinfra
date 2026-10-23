@@ -31,6 +31,51 @@ def _rmsnorm_kernel(x_ptr, w_ptr, out_ptr, stride, N, eps,
                  mask=mask)
 
 
+@triton.autotune(
+    configs=[triton.Config({"BLOCK": b}, num_warps=w)
+             for b in (1024, 2048) for w in (4, 8)],
+    key=["N"],
+)
+@triton.jit
+def _rmsnorm_amax_kernel(x_ptr, w_ptr, out_ptr, part_ptr, stride, N, eps,
+                         BLOCK: tl.constexpr):
+    """rmsnorm + 顺带写每行 amax partial（fp8 融合量化用）。
+
+    amax 取 bf16 舍入后的值（即后续量化 kernel 读回的同一 bit pattern），
+    与单独跑 _row_amax 的结果 bit-exact 一致。"""
+    row = tl.program_id(0)
+    base = row * stride
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for off in range(0, N, BLOCK):
+        offs = off + tl.arange(0, BLOCK)
+        mask = offs < N
+        x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        acc += x * x
+    rms = tl.rsqrt(tl.sum(acc, 0) / N + eps)
+    amax = 0.0
+    for off in range(0, N, BLOCK):
+        offs = off + tl.arange(0, BLOCK)
+        mask = offs < N
+        x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        w = tl.load(w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        y = (x * rms * w).to(out_ptr.dtype.element_ty)
+        tl.store(out_ptr + base + offs, y, mask=mask)
+        amax = tl.maximum(amax, tl.max(tl.abs(y.to(tl.float32))))
+    tl.store(part_ptr + row, amax)
+
+
+def triton_rmsnorm_amax(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6):
+    """返回 (normed bf16, 每行 amax partial [M] fp32)。一趟读写。"""
+    x = x.contiguous()
+    shape = x.shape
+    x2 = x.view(-1, shape[-1])
+    out = torch.empty_like(x2)
+    part = torch.empty(x2.shape[0], device=x.device, dtype=torch.float32)
+    _rmsnorm_amax_kernel[(x2.shape[0],)](x2, w, out, part, out.stride(0),
+                                         shape[-1], eps)
+    return out.view(shape), part
+
+
 def triton_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
                    ) -> torch.Tensor:
     """函数式 RMSNorm：x [*, N] 连续化后整行一趟（与模块同 kernel）。"""

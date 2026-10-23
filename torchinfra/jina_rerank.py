@@ -26,9 +26,9 @@ from torchinfra.model import Qwen3ForCausalLM
 from torchinfra.weights import load_weights
 from torchinfra.fp8_ckpt import is_fp8_checkpoint, load_fp8_checkpoint
 from torchinfra.fuse import fuse_decode_projections
-from torchinfra.triton_kernels import triton_rmsnorm
-from torchinfra.triton_kernels.silu import silu_mul
-from torchinfra.fp8_linear import quantize_weight, fp8_linear
+from torchinfra.triton_kernels import triton_rmsnorm, triton_rmsnorm_amax
+from torchinfra.triton_kernels.silu import silu_mul, silu_mul_amax
+from torchinfra.fp8_linear import quantize_weight, fp8_linear, fp8_linear_q
 
 @triton.jit
 def _window_attn_kernel(
@@ -442,9 +442,16 @@ class JinaReranker:
         for i, layer in enumerate(model.model.layers):
             attn = layer.self_attn
             eps = attn.q_norm.eps
-            h = triton_rmsnorm(x, layer.input_layernorm.weight, eps)
-            qkv = (fp8_linear(h, attn.w_qkv_fp8, attn.w_qkv_s) if self.fp8
-                   else F.linear(h, attn.w_qkv))
+            if self.fp8:
+                # 量化融合：rmsnorm/silu 顺带吐每行 amax partial，fp8_linear_q
+                # 跳过全量 _row_amax 读（每层省 3 kernel + 3 趟激活读，数值
+                # 与融合前 bit-exact：partial 用 bf16 舍入后的值算）
+                h, ph = triton_rmsnorm_amax(x, layer.input_layernorm.weight,
+                                            eps)
+                qkv = fp8_linear_q(h, attn.w_qkv_fp8, attn.w_qkv_s, ph)
+            else:
+                h = triton_rmsnorm(x, layer.input_layernorm.weight, eps)
+                qkv = F.linear(h, attn.w_qkv)
             nq = attn.n_heads * attn.hd
             nk = attn.n_kv * attn.hd
             q_in = qkv[..., :nq].reshape(B * S, attn.n_heads, attn.hd)
@@ -483,11 +490,12 @@ class JinaReranker:
                 attn_out = out.transpose(1, 2).reshape(B, S, -1).contiguous()
             if self.fp8:
                 x = x + fp8_linear(attn_out, attn.o_w_fp8, attn.o_w_s)
-                h2 = triton_rmsnorm(x, layer.post_attention_layernorm.weight, eps)
-                gu = fp8_linear(h2, layer.mlp.w_gu_fp8, layer.mlp.w_gu_s)
-                act = silu_mul(gu.reshape(B * S, -1))
-                x = x + fp8_linear(act, layer.mlp.down_w_fp8, layer.mlp.down_w_s
-                                   ).view(B, S, -1)
+                h2, ph2 = triton_rmsnorm_amax(
+                    x, layer.post_attention_layernorm.weight, eps)
+                gu = fp8_linear_q(h2, layer.mlp.w_gu_fp8, layer.mlp.w_gu_s, ph2)
+                act, pa = silu_mul_amax(gu.reshape(B * S, -1))
+                x = x + fp8_linear_q(act, layer.mlp.down_w_fp8,
+                                     layer.mlp.down_w_s, pa).view(B, S, -1)
             else:
                 x = x + attn.o_proj(attn_out)
                 h2 = triton_rmsnorm(x, layer.post_attention_layernorm.weight, eps)
