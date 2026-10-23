@@ -200,7 +200,7 @@ def serve(model_dir: str, host: str = "127.0.0.1", port: int = 8000,
 
 def main() -> None:
     p = argparse.ArgumentParser(description="jina-reranker-v3.5 OpenAI 风格 rerank 服务")
-    p.add_argument("--model", default="~/models/jina-reranker-v3.5")
+    p.add_argument("--model", default="~/models/jina-reranker-v3.5-fp8")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--max-batch", type=int, default=8)

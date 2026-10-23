@@ -332,6 +332,27 @@ S=256/1024/4096/8192 全 0），跨桶真实文本只约束投影归一化后的
 另：CUPTI 在此栈上丢事件严重（CUDA 侧 kernel 计数不可信），kernel 数
 主张只报结构性事实（_row_amax 28→0/前向），量化收益以 e2e 为准。
 
+### serving：标准 rerank API（0.0.0.0）
+
+    cd ~/项目/torchinfra
+    PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_RESULT_FILE=./tunableop_results0.csv \
+    PYTHONPATH=. nohup ~/rocm10/bin/python -m torchinfra.rerank_server \
+        --host 0.0.0.0 --port 8000 --model ~/models/jina-reranker-v3.5-fp8 &
+
+对外是 Jina/Cohere/vLLM 通用的 `/v1/rerank`（另 `/rerank`、`/health`、
+`/v1/models`）：
+
+    POST /v1/rerank
+    {"model": "jina-reranker-v3.5", "query": "...",
+     "documents": ["...", ...], "top_n": 3, "return_documents": true}
+    → {"results": [{"index": 0, "relevance_score": 0.35,
+                    "document": {"text": "..."}}], "usage": {...}}
+
+documents 也接受 `[{"text": "..."}]`；>125 篇自动分块加权合并；并发请求由
+调度器拼批（`--max-batch`/`--coalesce-ms`，GPU 只有调度线程跑前向）。
+已实测：本机/局域网 IP（0.0.0.0 绑定）、130 篇多块 0.86s、8 并发全 200。
+注意无鉴权，暴露到局域网（含 tailscale 侧）需自行加防火墙规则。
+
 **torch.compile 负结果（2026-10-23 实测，tools/bench_compile_rerank.py）**：
 对 reranker 前向直接 compile 不可用——S=767 能编译但**慢于 eager**
 （15.3 vs 13.9ms，0.91x）且**数值错**（hidden 相对误差 9.2e-2，P8
