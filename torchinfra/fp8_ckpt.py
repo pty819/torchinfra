@@ -107,6 +107,110 @@ def save_fp8_checkpoint(src: str | Path, dst: str | Path) -> Path:
     return dst
 
 
+def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path) -> Path:
+    """多分片 bf16 checkpoint 的通用版：自动发现文本塔层前缀（兼容
+    `model.layers.N` / `model.language_model.layers.N`），7 个 Linear 量化成
+    E4M3（QKV 共 scale、gate/up 共 scale，运行时拼回一次 GEMM 的字节就是盘上的
+    字节），视觉塔/projector/score head/embedding/norm 保持 bf16。
+
+    输出镜像原分片布局（scale 跟随对应 .weight 所在分片），index 的
+    total_size 按输出重算。内存策略：全量加载后每量化一个 Linear 就地
+    pop 掉 bf16 源，峰值 ≈ 原模型 + 一份 fp8。
+    """
+    import re
+
+    src, dst = Path(src), Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    idx = json.loads((src / "model.safetensors.index.json").read_text())
+    wm: dict[str, str] = idx["weight_map"]
+
+    sd: dict[str, torch.Tensor] = {}
+    for f in sorted(set(wm.values())):
+        sd.update(load_file(str(src / f)))
+
+    layers = sorted(
+        {m.group(1) for k in sd
+         for m in [re.match(r"(.+\.layers\.\d+)\.self_attn\.q_proj\.weight$", k)] if m},
+        key=lambda p: int(p.rsplit(".", 1)[1]),
+    )
+    if not layers:
+        raise ValueError("未发现任何 `<prefix>.layers.N.self_attn.q_proj.weight`，不是已知布局")
+
+    n_fp8 = 0
+    for layer in layers:
+        a, m = f"{layer}.self_attn", f"{layer}.mlp"
+        shapes = {n: sd[f"{a}.{n}_proj.weight"].shape for n in "qkv"}
+        fused = torch.cat([sd.pop(f"{a}.{n}_proj.weight") for n in "qkv"], dim=0)
+        q, s = _quantize_tensor(fused)
+        del fused
+        nq = shapes["q"][0]
+        nk = shapes["k"][0]
+        for i, n in enumerate("qkv"):
+            beg = 0 if n == "q" else (nq if n == "k" else nq + nk)
+            end = beg + shapes[n][0]
+            sd[f"{a}.{n}_proj.weight"] = q[beg:end].clone()
+            sd[f"{a}.{n}_proj.weight_scale"] = s.clone()
+        for name in ("o_proj", "down_proj"):
+            w = sd.pop(f"{a if name == 'o_proj' else m}.{name}.weight")
+            qs, ss = _quantize_tensor(w)
+            del w
+            sd[f"{a if name == 'o_proj' else m}.{name}.weight"] = qs
+            sd[f"{a if name == 'o_proj' else m}.{name}.weight_scale"] = ss
+        gshapes = (sd[f"{m}.gate_proj.weight"].shape[0],
+                   sd[f"{m}.up_proj.weight"].shape[0])
+        fused = torch.cat([sd.pop(f"{m}.gate_proj.weight"), sd.pop(f"{m}.up_proj.weight")], dim=0)
+        gq, gs = _quantize_tensor(fused)
+        del fused
+        sd[f"{m}.gate_proj.weight"] = gq[: gshapes[0]].clone()
+        sd[f"{m}.gate_proj.weight_scale"] = gs.clone()
+        sd[f"{m}.up_proj.weight"] = gq[gshapes[0]:].clone()
+        sd[f"{m}.up_proj.weight_scale"] = gs.clone()
+        n_fp8 += 7
+    del layers
+
+    # 输出镜像原分片：scale 跟随 .weight 所在分片
+    out_shards: dict[str, dict[str, torch.Tensor]] = {f: {} for f in set(wm.values())}
+    for key, f in wm.items():
+        out_shards[f][key] = sd.pop(key)
+        if key.endswith(".weight") and (key[: -len("weight")] + "weight_scale") in sd:
+            out_shards[f][key[: -len("weight")] + "weight_scale"] = sd.pop(
+                key[: -len("weight")] + "weight_scale")
+    assert not sd, f"有张量没归入任何分片: {list(sd)[:5]}"
+
+    total = 0
+    for f, tensors in sorted(out_shards.items()):
+        save_file(tensors, str(dst / f))
+        total += sum(t.numel() * t.element_size() for t in tensors.values())
+
+    new_idx = {"metadata": {"total_size": total}, "weight_map": {}}
+    for f, tensors in out_shards.items():
+        for key in tensors:
+            new_idx["weight_map"][key] = f
+    (dst / "model.safetensors.index.json").write_text(
+        json.dumps(new_idx, indent=2) + "\n")
+
+    raw = json.loads((src / "config.json").read_text())
+    raw["quantization_config"] = {
+        "quant_method": "fp8",
+        "fmt": "float8_e4m3fn",
+        "weight_scale": "tensor",
+        "activation_scheme": "dynamic",
+        "ignored": ["embed_tokens", "score", "projector", "norm",
+                    "q_norm", "k_norm", "vision_tower"],
+        "n_fp8_tensors": n_fp8,
+    }
+    (dst / "config.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+
+    # 其余文件（model.py / chat_template / tokenizer / sentence-transformers 配置等）全量复制
+    for p in src.iterdir():
+        if p.is_file() and p.suffix not in (".safetensors",) and p.name != "config.json":
+            shutil.copy2(p, dst / p.name)
+    for d in src.iterdir():
+        if d.is_dir():
+            shutil.copytree(d, dst / d.name, dirs_exist_ok=True)
+    return dst
+
+
 def load_fp8_checkpoint(model_dir: str | Path, device: str = "cuda"):
     """返回 (bf16 状态字典, fp8 权重)。
 
