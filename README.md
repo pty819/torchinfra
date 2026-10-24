@@ -439,3 +439,37 @@ TUNING=1（该改动保留：调优 kernel 混进图捕获同样会打挂队列�
 但 qkv 384MB / gu 448MB 大块反复进出后固定尺寸缓存器留了 ~900MB
 reserved-unallocated 碎片。`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 （模块头 setdefault）+ rope 后立刻 `del qkv` 后 32K 稳定通过。
+
+### P13.1 — per-projection scale：融合 GEMM 不拆，段修正乘进下游 kernel（2026-10-24）
+
+对 P13 的 QKV/gate-up 共享 scale 做精度升级。**反直觉的实验发现先行**：
+逐张量 dequant 余弦几乎不随 scale 拆分变化（q/k/v 各投影 ±1e-5，V 的
+scale 细了 3.2 倍余弦纹丝不动）——fp8 是浮点格式，**换 scale 不改变每个
+元素的相对量化精度**（e4m3 相对网格密度与 scale 无关，只在裁剪/下溢
+边缘起作用，权重分布良好到不了边缘）。scale 粒度真正要紧的是 INT 格式
+和有离群通道的激活。共享版真正的损伤源是**共享 scale 让 q/k/v 的量化
+误差结构相关**，穿过注意力复利放大；拆开后误差独立化，端到端
+**max|Δ| 0.0914 → 0.0403**（同 bf16 参考 8 对，排序全保）。
+
+三种落地方案的实测对比（数学上都等价于 per-column epilogue descale）：
+
+| 方案 | GEMM 代价 | 确定性 | 结论 |
+|---|---|---|---|
+| rowwise scale_b [1,N]（_scaled_mm 原生） | 1.66×（0.683→1.136ms@qkv 形状） | — | 判死 |
+| 拆 3+2 个 tensorwise GEMM（fp8_linear_q_multi，激活只量化一次） | 实测 ±0（N=1024 瘦 GEMM 也没吃亏） | 瘦形状触发 hipBLASLt split-k 原子归约，批内相同行抖 6.6e-4 | 可用但非终态 |
+| **融合单 GEMM + 下游 kernel 段修正（采用）** | 0（就是原融合 GEMM） | 逐位确定 | 终态 |
+
+采用方案的机制：q/k/v 仍拼成 [6144,4096] 单 GEMM，各段按自己的 scale
+量化；GEMM 的 tensorwise scale_b 取 q 段的 sq，k/v 段的比值修正
+(kc=sk/sq, vc=sv/sq) 由 `_rope_qkv_kernel` 在 load 后 fp32 补乘（它本来
+就要读 k/v 做 rope，零额外访存）；gate/up 同理，修正乘进 silu_mul_amax。
+数学上等价于 GEMM epilogue 按列 descale（激活共用量化也对——同一 X 进
+qkv/gu，一个 tensorwise 激活 scale 本来就只算一次），但不需要手写 GEMM，
+也不掉进慢 1.66× 的 rowwise 路径。共享 scale checkpoint 的 kc=vc=uc≡1，
+同一 loader 兼容加载（对拍 0.0914 与旧版逐位一致）。
+
+量化侧：`save_fp8_checkpoint_sharded(..., split_scales=True)`（盘上 key
+布局不变，config 标 `tensor_per_projection`）；产物
+`~/models/Nemotron-3.5-Rerank-8B-FP8S`（推荐，8.8GB，与 FP8 同尺寸）。
+bench 与 P13 基线持平（S=512 64.3ms/7964 tok/s … 32K 12171ms），等长
+batch 恢复逐位一致（Δ=0.00e+00）。

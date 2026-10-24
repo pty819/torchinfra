@@ -9,8 +9,12 @@
 - llama-4 式 Q attn-scale：q *= 1+0.1·ln(1+floor(pos/16384))，pos<16384 恒为 1
   （32K 段 1+0.1·ln2≈1.0693，只在上 16K 生效，kernel 里用 constexpr 关掉）
 - 打分：final RMSNorm → valid mean-pool → fp32 Linear(4096→1)（score 头 bf16 权重）
-- 权重走 torchinfra fp8 checkpoint（QKV/gate-up 共 scale）；视觉塔与 projector
-  不加载（文本 rerank 用不到，省 0.8GB）
+- 权重走 torchinfra fp8 checkpoint，**per-projection scale**（q/k/v、gate/up
+  各自独立，split_scales 产物）但仍是融合单 GEMM：epilogue 的 tensorwise
+  scale_b 取 q/gate 段，k/v/up 段的比值修正（sk/sq 等）在下游自有 kernel
+  （rope/silu）load 后 fp32 补乘——数学上等价 GEMM epilogue 按列 descale，
+  却不掉进慢 1.66x 的 rowwise _scaled_mm 路径。共享 scale checkpoint 的
+  修正恒为 1，兼容加载。视觉塔与 projector 不加载（省 0.8GB）
 
 性能设计（沿用 P10–P12 结论）：
 - 注意力核心走 SDPA：双向无 mask 时 flash 是这张卡的天花板（32K 实测 146 TF）；
@@ -94,7 +98,7 @@ def rope_tables(max_pos: int = MAX_POS, device="cuda"):
 @triton.jit
 def _rope_qkv_kernel(
     QKV, COS, SIN, POS, QO, KO, VO,
-    s_row, s_cos, n_rows, seq,
+    s_row, s_cos, n_rows, seq, kc, vc,
     NQ: tl.constexpr, NKV: tl.constexpr, D: tl.constexpr,
     HALF: tl.constexpr, TR: tl.constexpr, L4SC: tl.constexpr,
     ORIG: tl.constexpr, BETA: tl.constexpr,
@@ -103,6 +107,12 @@ def _rope_qkv_kernel(
 
     无 qk-norm（ministral3 没有）。L4SC=True 时 Q 乘 llama-4 attn-scale
     （1+BETA·ln(1+floor(pos/ORIG))，pos<ORIG 恒 1）。V 顺带搬运省一次 permute。
+
+    kc/vc 是 per-projection scale 的段修正：融合 GEMM 的 epilogue 只能带
+    一个 tensorwise scale_b（取 q 段的 sq），k/v 段在量化时用了自己的
+    sk/sv，输出差 (sk/sq)、(sv/sq) 倍——在这里 load 后 fp32 补乘，等价于
+    GEMM epilogue 按列 descale，但不用掉进慢 1.66x 的 rowwise 路径。
+    共享 scale checkpoint 的 kc=vc=1。
     """
     rb = tl.program_id(0)
     h = tl.program_id(1)
@@ -130,16 +140,20 @@ def _rope_qkv_kernel(
     tl.store(QO + db + HALF + off[None, :], qb2, mask=rm[:, None])
 
     if h < NKV:
-        kb = rows[:, None] * s_row + NQ * D + h * D
-        a = tl.load(QKV + kb + off[None, :], mask=rm[:, None], other=0.0)
-        b = tl.load(QKV + kb + HALF + off[None, :], mask=rm[:, None], other=0.0)
+        koff = rows[:, None] * s_row + NQ * D + h * D
+        ka = tl.load(QKV + koff + off[None, :], mask=rm[:, None],
+                     other=0.0).to(tl.float32) * kc
+        kb = tl.load(QKV + koff + HALF + off[None, :], mask=rm[:, None],
+                     other=0.0).to(tl.float32) * kc
         kdb = ((bi[:, None] * NKV + h) * seq + row[:, None]) * D
-        tl.store(KO + kdb + off[None, :], a * cos - b * sin, mask=rm[:, None])
-        tl.store(KO + kdb + HALF + off[None, :], b * cos + a * sin, mask=rm[:, None])
+        tl.store(KO + kdb + off[None, :], ka * cos - kb * sin, mask=rm[:, None])
+        tl.store(KO + kdb + HALF + off[None, :], kb * cos + ka * sin, mask=rm[:, None])
         vb = rows[:, None] * s_row + (NQ + NKV) * D + h * D
         for dd in range(0, D, HALF):
-            vv = tl.load(QKV + vb + dd + off[None, :], mask=rm[:, None], other=0.0)
-            tl.store(VO + kdb + dd + off[None, :], vv, mask=rm[:, None])
+            vv = tl.load(QKV + vb + dd + off[None, :], mask=rm[:, None],
+                         other=0.0).to(tl.float32) * vc
+            tl.store(VO + kdb + dd + off[None, :],
+                     vv.to(VO.dtype.element_ty), mask=rm[:, None])
 
 
 class _Layer:
@@ -240,22 +254,27 @@ def _load_tower_fp8(model_dir: Path):
     dev = "cuda"
     for i, ly in enumerate(layers):
         r = ly.raw
-        q, k_, v_ = (r["self_attn.q_proj.weight"].to(dev),
-                     r["self_attn.k_proj.weight"].to(dev),
-                     r["self_attn.v_proj.weight"].to(dev))
+        # 融合 GEMM + per-projection scale：q/k/v 拼回 [6144,4096] 单 GEMM，
+        # scale_b 取 q 段；k/v 段的比值修正交给 rope kernel 补乘（同理
+        # gate/up）。共享 scale checkpoint 的修正恒为 1.0，同样可加载。
         qs, ks, vs = (r["self_attn.q_proj.weight_scale"],
                       r["self_attn.k_proj.weight_scale"],
                       r["self_attn.v_proj.weight_scale"])
-        assert torch.equal(qs, ks) and torch.equal(qs, vs), f"layer{i} qkv scale 不一致"
-        ly.w_qkv_fp8 = torch.cat([q, k_, v_], 0).contiguous()
+        ly.w_qkv_fp8 = torch.cat(
+            [r["self_attn.q_proj.weight"].to(dev),
+             r["self_attn.k_proj.weight"].to(dev),
+             r["self_attn.v_proj.weight"].to(dev)], 0).contiguous()
         ly.w_qkv_s = qs.to(dev)
+        ly.kc = float(ks.item() / qs.item())
+        ly.vc = float(vs.item() / qs.item())
         ly.o_w_fp8 = r["self_attn.o_proj.weight"].to(dev)
         ly.o_w_s = r["self_attn.o_proj.weight_scale"].to(dev)
-        gt, up = r["mlp.gate_proj.weight"].to(dev), r["mlp.up_proj.weight"].to(dev)
-        gts, ups = r["mlp.gate_proj.weight_scale"], r["mlp.up_proj.weight_scale"]
-        assert torch.equal(gts, ups), f"layer{i} gate/up scale 不一致"
-        ly.w_gu_fp8 = torch.cat([gt, up], 0).contiguous()
-        ly.w_gu_s = gts.to(dev)
+        gs, us = r["mlp.gate_proj.weight_scale"], r["mlp.up_proj.weight_scale"]
+        ly.w_gu_fp8 = torch.cat(
+            [r["mlp.gate_proj.weight"].to(dev),
+             r["mlp.up_proj.weight"].to(dev)], 0).contiguous()
+        ly.w_gu_s = gs.to(dev)
+        ly.uc = float(us.item() / gs.item())
         ly.down_w_fp8 = r["mlp.down_proj.weight"].to(dev)
         ly.down_w_s = r["mlp.down_proj.weight_scale"].to(dev)
         ly.ln1 = r["input_layernorm.weight"].to(dev)
@@ -304,13 +323,12 @@ class NemotronReranker:
         q = torch.empty(B, NQ, S, HD, dtype=qkv.dtype, device=x.device)
         k = torch.empty(B, NKV, S, HD, dtype=qkv.dtype, device=x.device)
         v = torch.empty(B, NKV, S, HD, dtype=qkv.dtype, device=x.device)
-        # kernel 按 [B*S, C] 展平行寻址：必须传展平后的行跨度 C=6144。
-        # qkv 是 [B,S,C]，stride(0)=S*C（二维单测里恰好等于 C，掩盖了这 bug，
-        # 三维真跑直接越界 → HSA_STATUS_ERROR_MEMORY_FAULT）
+        # kernel 按 [B*S, C] 展平行寻址：必须传展平后的行跨度 C=6144
+        # （qkv [B,S,C] 的 stride(0)=S*C，曾因传错越界 HSA fault）
         qkv2 = qkv.view(B * S, -1)
         _rope_qkv_kernel[(triton.cdiv(B * S, ROPE_TR), NQ)](
             qkv2, cos, sin, self.pos_cache(S, B, x.device), q, k, v,
-            qkv2.stride(0), cos.stride(0), B * S, S,
+            qkv2.stride(0), cos.stride(0), B * S, S, ly.kc, ly.vc,
             NQ=NQ, NKV=NKV, D=HD, HALF=half, TR=ROPE_TR,
             L4SC=S > ROPE_ORIG, ORIG=float(ROPE_ORIG), BETA=0.1,
             num_warps=ROPE_WARPS)
@@ -329,11 +347,11 @@ class NemotronReranker:
         return out, apart
 
     def _mlp_block(self, ly: _Layer, x, B, S):
-        """gu GEMM + silu_mul + down GEMM；S 超阈值按行分块压峰值。"""
+        """融合 gu GEMM + silu_mul（up 段修正）+ down GEMM；S 超阈值分块。"""
         if B * S <= MLP_CHUNK_S:
             h2, ph2 = triton_rmsnorm_amax(x, ly.ln2, EPS)
             gu = fp8_linear_q(h2, ly.w_gu_fp8, ly.w_gu_s, ph2)
-            act, pa = silu_mul_amax(gu.reshape(B * S, FFN * 2))
+            act, pa = silu_mul_amax(gu.view(B * S, FFN * 2), 1.0, ly.uc)
             return x + fp8_linear_q(act, ly.down_w_fp8, ly.down_w_s,
                                     pa).view(B, S, HIDDEN)
         rows = x.reshape(B * S, HIDDEN)
@@ -342,7 +360,7 @@ class NemotronReranker:
             rc = rows[r0:r0 + MLP_CHUNK_S]
             h2, ph2 = triton_rmsnorm_amax(rc, ly.ln2, EPS)
             gu = fp8_linear_q(h2, ly.w_gu_fp8, ly.w_gu_s, ph2)
-            act, pa = silu_mul_amax(gu)
+            act, pa = silu_mul_amax(gu, 1.0, ly.uc)
             out[r0:r0 + MLP_CHUNK_S] = fp8_linear_q(act, ly.down_w_fp8,
                                                     ly.down_w_s, pa)
         return x + out.view(B, S, HIDDEN)

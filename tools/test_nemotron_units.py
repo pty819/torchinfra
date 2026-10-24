@@ -29,11 +29,11 @@ def test_yarn():
     return rope_tables(4096, "cpu")
 
 
-def torch_rope_ref(qkv, pos, cos, sin, l4sc):
+def torch_rope_ref(qkv, pos, cos, sin, l4sc, kc=1.0, vc=1.0):
     BS = qkv.shape[0]
     q = qkv[:, :NQ * HD].view(BS, NQ, HD).float()
-    k = qkv[:, NQ * HD:NQ * HD + NKV * HD].view(BS, NKV, HD).float()
-    v = qkv[:, NQ * HD + NKV * HD:].view(BS, NKV, HD)
+    k = qkv[:, NQ * HD:NQ * HD + NKV * HD].view(BS, NKV, HD).float() * kc
+    v = (qkv[:, NQ * HD + NKV * HD:].view(BS, NKV, HD).float() * vc)
     half = HD // 2
     cs = cos[pos.long()]   # [BS, half]
     c, s = cs[:, None, :], sin[pos.long()][:, None, :]
@@ -44,7 +44,7 @@ def torch_rope_ref(qkv, pos, cos, sin, l4sc):
         q = q * qs[:, None, None]
     a, b = k[..., :half], k[..., half:]
     k = torch.cat([a * c - b * s, b * c + a * s], -1)
-    return q.bfloat16(), k.bfloat16(), v
+    return q.bfloat16(), k.bfloat16(), v.bfloat16()
 
 
 def test_rope(cos, sin):
@@ -55,15 +55,15 @@ def test_rope(cos, sin):
     qkv = torch.randn(BS, (NQ + 2 * NKV) * HD, dtype=torch.bfloat16, device=dev)
     pos = torch.arange(S, dtype=torch.int32, device=dev).repeat(B).reshape(-1)
     cos, sin = cos.to(dev), sin.to(dev)
-    for l4 in (False, True):
+    for l4, kc, vc in [(False, 1.0, 1.0), (True, 1.0, 1.0), (False, 1.7, 0.35)]:
         q = torch.empty(B, NQ, S, HD, dtype=torch.bfloat16, device=dev)
         k = torch.empty(B, NKV, S, HD, dtype=torch.bfloat16, device=dev)
         v = torch.empty(B, NKV, S, HD, dtype=torch.bfloat16, device=dev)
         _rope_qkv_kernel[(triton.cdiv(BS, ROPE_TR), NQ)](
             qkv, cos, sin, pos, q, k, v, qkv.stride(0), cos.stride(0),
-            BS, S, NQ=NQ, NKV=NKV, D=HD, HALF=HD // 2, TR=ROPE_TR,
+            BS, S, kc, vc, NQ=NQ, NKV=NKV, D=HD, HALF=HD // 2, TR=ROPE_TR,
             L4SC=l4, ORIG=float(ROPE_ORIG), BETA=0.1, num_warps=ROPE_WARPS)
-        qr, kr, vr = torch_rope_ref(qkv, pos, cos, sin, l4)
+        qr, kr, vr = torch_rope_ref(qkv, pos, cos, sin, l4, kc, vc)
         # kernel 输出 [B,H,S,D] → 参考转成同布局
         qr_t = qr.view(B, S, NQ, HD).transpose(1, 2)
         kr_t = kr.view(B, S, NKV, HD).transpose(1, 2)
@@ -71,7 +71,8 @@ def test_rope(cos, sin):
         dq = (q.float() - qr_t.float()).abs().max().item()
         dk = (k.float() - kr_t.float()).abs().max().item()
         dv = (v.float() - vr_t.float()).abs().max().item()
-        print(f"B. rope L4SC={l4}: |Δq|={dq:.2e} |Δk|={dk:.2e} |Δv|={dv:.2e}")
+        print(f"B. rope L4SC={l4} kc={kc} vc={vc}: "
+              f"|Δq|={dq:.2e} |Δk|={dk:.2e} |Δv|={dv:.2e}")
         assert max(dq, dk, dv) < 2e-2, "rope kernel 与参考偏差过大"
 
 

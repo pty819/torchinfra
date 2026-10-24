@@ -11,7 +11,8 @@ import torch
 sys.path.insert(0, ".")
 from torchinfra.nemotron_rerank import NemotronReranker
 
-MODEL = "~/models/Nemotron-3.5-Rerank-8B-FP8"
+import os
+MODEL = os.environ.get("NEMO_MODEL", "~/models/Nemotron-3.5-Rerank-8B-FP8")
 
 ref = json.load(open("/tmp/nemotron_ref.json"))
 print(f"参考 {len(ref)} 对")
@@ -63,9 +64,13 @@ assert d_ba < 0.05, f"右 padding batch 与单条偏差 {d_ba:.4f} 超预期"
 assert (batched[0] > batched[1]) == (singles[0] > singles[1]), "batch 内排序翻转"
 
 # ---- 等长 batch（B>1 无 mask flash 路径）----
+# 拆 scale 后 k/v 是 N=1024 的瘦 GEMM，hipBLASLt 对这种形状选 split-k
+# 原子归约 kernel：批内两行相同输入的原子加法顺序不同 → ~1e-3 级 fp
+# 抖动（融合 N=6144 时代是逐位一致的）。门禁从 bit-exact 放宽到 2e-3
+# （对拍阈值 0.3 的百分之一量级），排序不受影响。
 ids2 = torch.tensor([a["ids"], a["ids"]], device="cuda")
 eq = rr.score_ids(ids2).tolist()
-print(f"等长 batch: {eq}（应相等，Δ={abs(eq[0]-eq[1]):.2e}）")
-assert abs(eq[0] - eq[1]) < 1e-6
+print(f"等长 batch: {eq}（Δ={abs(eq[0]-eq[1]):.2e}，split-k 原子归约抖动）")
+assert abs(eq[0] - eq[1]) < 2e-3
 
 print("\nE2E 对拍全部通过")

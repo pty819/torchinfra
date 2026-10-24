@@ -107,11 +107,20 @@ def save_fp8_checkpoint(src: str | Path, dst: str | Path) -> Path:
     return dst
 
 
-def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path) -> Path:
+def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path,
+                                split_scales: bool = False) -> Path:
     """多分片 bf16 checkpoint 的通用版：自动发现文本塔层前缀（兼容
     `model.layers.N` / `model.language_model.layers.N`），7 个 Linear 量化成
-    E4M3（QKV 共 scale、gate/up 共 scale，运行时拼回一次 GEMM 的字节就是盘上的
-    字节），视觉塔/projector/score head/embedding/norm 保持 bf16。
+    E4M3，视觉塔/projector/score head/embedding/norm 保持 bf16。
+
+    split_scales=False（默认，jina 沿用）：QKV 共一个 scale、gate/up 共一个
+    scale——按融合矩阵整体算 amax，运行时 cat 回单 GEMM，盘上字节=显存字节；
+    代价是共享段里 amax 小的投影被拖粗（Nemotron 实测最差 k_proj cos
+    0.99897 即此因）。
+    split_scales=True：每个投影独立 per-tensor scale（vLLM 等 fp8 部署的
+    标准粒度）。盘上 key 布局与 False 完全相同（只是 3/2 个 scale 的值
+    不同）；运行时 qkv/gu 拆成 3/2 个 GEMM，激活只量化一次喂多个 GEMM
+    （fp8_linear_q_multi）。
 
     输出镜像原分片布局（scale 跟随对应 .weight 所在分片），index 的
     total_size 按输出重算。内存策略：全量加载后每量化一个 Linear 就地
@@ -139,32 +148,44 @@ def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path) -> Path:
     n_fp8 = 0
     for layer in layers:
         a, m = f"{layer}.self_attn", f"{layer}.mlp"
-        shapes = {n: sd[f"{a}.{n}_proj.weight"].shape for n in "qkv"}
-        fused = torch.cat([sd.pop(f"{a}.{n}_proj.weight") for n in "qkv"], dim=0)
-        q, s = _quantize_tensor(fused)
-        del fused
-        nq = shapes["q"][0]
-        nk = shapes["k"][0]
-        for i, n in enumerate("qkv"):
-            beg = 0 if n == "q" else (nq if n == "k" else nq + nk)
-            end = beg + shapes[n][0]
-            sd[f"{a}.{n}_proj.weight"] = q[beg:end].clone()
-            sd[f"{a}.{n}_proj.weight_scale"] = s.clone()
+        if split_scales:
+            for n in "qkv":
+                qs, ss = _quantize_tensor(sd.pop(f"{a}.{n}_proj.weight"))
+                sd[f"{a}.{n}_proj.weight"] = qs
+                sd[f"{a}.{n}_proj.weight_scale"] = ss
+        else:
+            shapes = {n: sd[f"{a}.{n}_proj.weight"].shape for n in "qkv"}
+            fused = torch.cat([sd.pop(f"{a}.{n}_proj.weight") for n in "qkv"], dim=0)
+            q, s = _quantize_tensor(fused)
+            del fused
+            nq = shapes["q"][0]
+            nk = shapes["k"][0]
+            for i, n in enumerate("qkv"):
+                beg = 0 if n == "q" else (nq if n == "k" else nq + nk)
+                end = beg + shapes[n][0]
+                sd[f"{a}.{n}_proj.weight"] = q[beg:end].clone()
+                sd[f"{a}.{n}_proj.weight_scale"] = s.clone()
         for name in ("o_proj", "down_proj"):
             w = sd.pop(f"{a if name == 'o_proj' else m}.{name}.weight")
             qs, ss = _quantize_tensor(w)
             del w
             sd[f"{a if name == 'o_proj' else m}.{name}.weight"] = qs
             sd[f"{a if name == 'o_proj' else m}.{name}.weight_scale"] = ss
-        gshapes = (sd[f"{m}.gate_proj.weight"].shape[0],
-                   sd[f"{m}.up_proj.weight"].shape[0])
-        fused = torch.cat([sd.pop(f"{m}.gate_proj.weight"), sd.pop(f"{m}.up_proj.weight")], dim=0)
-        gq, gs = _quantize_tensor(fused)
-        del fused
-        sd[f"{m}.gate_proj.weight"] = gq[: gshapes[0]].clone()
-        sd[f"{m}.gate_proj.weight_scale"] = gs.clone()
-        sd[f"{m}.up_proj.weight"] = gq[gshapes[0]:].clone()
-        sd[f"{m}.up_proj.weight_scale"] = gs.clone()
+        if split_scales:
+            for name in ("gate_proj", "up_proj"):
+                qs, ss = _quantize_tensor(sd.pop(f"{m}.{name}.weight"))
+                sd[f"{m}.{name}.weight"] = qs
+                sd[f"{m}.{name}.weight_scale"] = ss
+        else:
+            gshapes = (sd[f"{m}.gate_proj.weight"].shape[0],
+                       sd[f"{m}.up_proj.weight"].shape[0])
+            fused = torch.cat([sd.pop(f"{m}.gate_proj.weight"), sd.pop(f"{m}.up_proj.weight")], dim=0)
+            gq, gs = _quantize_tensor(fused)
+            del fused
+            sd[f"{m}.gate_proj.weight"] = gq[: gshapes[0]].clone()
+            sd[f"{m}.gate_proj.weight_scale"] = gs.clone()
+            sd[f"{m}.up_proj.weight"] = gq[gshapes[0]:].clone()
+            sd[f"{m}.up_proj.weight_scale"] = gs.clone()
         n_fp8 += 7
     del layers
 
@@ -193,7 +214,7 @@ def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path) -> Path:
     raw["quantization_config"] = {
         "quant_method": "fp8",
         "fmt": "float8_e4m3fn",
-        "weight_scale": "tensor",
+        "weight_scale": "tensor_per_projection" if split_scales else "tensor_fused",
         "activation_scheme": "dynamic",
         "ignored": ["embed_tokens", "score", "projector", "norm",
                     "q_norm", "k_norm", "vision_tower"],

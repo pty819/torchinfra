@@ -82,6 +82,28 @@ def fp8_linear_q(x: torch.Tensor, w_fp8: torch.Tensor, w_scale: torch.Tensor,
     return y.view(*lead, w_fp8.shape[0])
 
 
+def fp8_linear_q_multi(x: torch.Tensor,
+                       ws: list[tuple[torch.Tensor, torch.Tensor]],
+                       partial: torch.Tensor) -> list[torch.Tensor]:
+    """同一激活 × 多个权重：只量化一次，喂多个 GEMM。
+
+    per-projection scale（split_scales checkpoint）的配套——q/k/v 或 gate/up
+    各自的权重 scale 不同，但激活侧仍是一个 tensorwise scale，没必要量化
+    三遍。ws = [(w_fp8 [N,K], w_scale), ...]，各权重的 K 必须一致。"""
+    lead, k = x.shape[:-1], x.shape[-1]
+    flat = x.reshape(-1, k).contiguous()
+    q, scale = quantize_from_partial(flat, partial)
+    outs = []
+    for w_fp8, w_scale in ws:
+        y = torch._scaled_mm(q, w_fp8.T, scale_a=scale,
+                             scale_b=w_scale.reshape(1),
+                             out_dtype=torch.bfloat16)
+        if isinstance(y, tuple):
+            y = y[0]
+        outs.append(y.view(*lead, w_fp8.shape[0]))
+    return outs
+
+
 def fp8_linear(x: torch.Tensor, w_fp8: torch.Tensor, w_scale: torch.Tensor
                ) -> torch.Tensor:
     """x [..., K] → [..., N] bf16。w_fp8 为 [N, K] 行主序。"""

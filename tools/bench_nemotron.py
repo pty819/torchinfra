@@ -4,7 +4,8 @@ sys.path.insert(0, ".")
 import torch
 from torchinfra.nemotron_rerank import NemotronReranker
 
-MODEL = "~/models/Nemotron-3.5-Rerank-8B-FP8"
+import os
+MODEL = os.environ.get("NEMO_MODEL", "~/models/Nemotron-3.5-Rerank-8B-FP8")
 rr = NemotronReranker.from_pretrained(MODEL)
 free0, total = torch.cuda.mem_get_info()
 print(f"加载后空闲 {free0/2**30:.2f} / {total/2**30:.2f} GiB\n")
