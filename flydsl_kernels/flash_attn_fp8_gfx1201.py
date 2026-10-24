@@ -463,25 +463,38 @@ def build_flash_attn_fp8_module(
         # buf p+1 -> barrier -> GEMM2[t](V buf p) -> 预取 K/V[t+2]。
         # GEMM2[t] 与下迭代 GEMM1[t+1] 之间无 barrier：装载 / exp2-pack /
         # GEMM2 三段原本各 ~3.9ms 全串行，流水后互相重叠。
-        def _gemm1(k_base):
-            accs = [_raw(c_zero_v8f32) for _ in range(NUM_S_ACCS)]
-            for ks in range_constexpr(K_STEPS_QK):
-                k_col = fx.Index(ks * K_STEP_QK) + klane * WMMA_LANE_K
-                for st_idx in range_constexpr(N_SUB_TILES):
-                    st_base_row = st_idx * K_SUB_N
-                    k_row_a = lane16 + fx.Index(st_base_row)
-                    k_lds_a = k_base + k_row_a * K_STRIDE + k_col
-                    k_pack_a = Vec.load(v8i8_type, lds_kv, [k_lds_a])
-                    k_row_b = lane16 + fx.Index(st_base_row + 16)
-                    k_lds_b = k_base + k_row_b * K_STRIDE + k_col
-                    k_pack_b = Vec.load(v8i8_type, lds_kv, [k_lds_b])
-                    accs[st_idx * 2] = wmma_fp8(
-                        to_v2i32(k_pack_a), to_v2i32(q_b_packs[ks]), accs[st_idx * 2]
-                    )
-                    accs[st_idx * 2 + 1] = wmma_fp8(
-                        to_v2i32(k_pack_b), to_v2i32(q_b_packs[ks]), accs[st_idx * 2 + 1]
-                    )
-            return accs
+            def _gemm1(k_base):
+                # ① 16 个 K pack 全部先装载（LDS 延迟互相重叠），再统一发
+                #    wmma——否则每个 wmma 等自己的 LDS，GEMM1 段变成 8 轮
+                #    "load+wait+wmma" 的串行；② 偶/奇 k-step 双累加链减浅排空
+                packs = []
+                for ks in range_constexpr(K_STEPS_QK):
+                    k_col = fx.Index(ks * K_STEP_QK) + klane * WMMA_LANE_K
+                    row = []
+                    for st_idx in range_constexpr(N_SUB_TILES):
+                        st_base_row = st_idx * K_SUB_N
+                        k_row_a = lane16 + fx.Index(st_base_row)
+                        row.append(Vec.load(v8i8_type, lds_kv, [k_base + k_row_a * K_STRIDE + k_col]))
+                        k_row_b = lane16 + fx.Index(st_base_row + 16)
+                        row.append(Vec.load(v8i8_type, lds_kv, [k_base + k_row_b * K_STRIDE + k_col]))
+                    packs.append(row)
+                accs = [_raw(c_zero_v8f32) for _ in range(NUM_S_ACCS * 2)]
+                for ks in range_constexpr(K_STEPS_QK):
+                    half = (ks & 1) * NUM_S_ACCS
+                    for st_idx in range_constexpr(N_SUB_TILES):
+                        accs[half + st_idx * 2] = wmma_fp8(
+                            to_v2i32(packs[ks][st_idx * 2]),
+                            to_v2i32(q_b_packs[ks]),
+                            accs[half + st_idx * 2],
+                        )
+                        accs[half + st_idx * 2 + 1] = wmma_fp8(
+                            to_v2i32(packs[ks][st_idx * 2 + 1]),
+                            to_v2i32(q_b_packs[ks]),
+                            accs[half + st_idx * 2 + 1],
+                        )
+                return [
+                    _fadd(accs[i], accs[NUM_S_ACCS + i]) for i in range(NUM_S_ACCS)
+                ]
 
         def _load_v_pipe(v_base, st_kv_base_val, pks_val, dc_val):
             if const_expr(v_layout == "transposed"):
@@ -500,17 +513,31 @@ def build_flash_attn_fp8_module(
                 v_elems.append(_memref.load(lds_kv, [_raw(v_base + kv_row * V_STRIDE + d_pos)]))
             return Vec.from_elements(v_elems, fx.Int8).ir_value()
 
+        # 计算流水：S[0] 在 prologue 算好；循环内先发射 GEMM1[t+1] 再消费
+        # 携带的 S[t]——softmax[t] 与 GEMM1[t+1] 无依赖，硬件重叠执行
         _k0 = coop_load_k_global(fx.Index(0))
         coop_store_k_lds(_k0, 0)
         _v0 = coop_load_v_global(fx.Index(0))
         coop_store_v_lds(_v0, 0)
         gpu.barrier()
-        _k_next = coop_load_k_global(fx.Index(0))
-        _v_next = coop_load_v_global(fx.Index(0))
+        s0_accs = _gemm1(k_buf_base(0))
+
+        def _clamp_tile_start(cand):
+            # 预取越界时折回到最后一个【对齐的】tile 起点（数据不会被消费，
+            # 只为不越界读；不能钳到 seq_len-32——那不是 tile 边界，
+            # 会把合法的最后 tile 换成错位数据）
+            _last = ((seq_len_v - fx.Index(1)) // fx.Index(BLOCK_N)) * fx.Index(BLOCK_N)
+            _last = fx.Index(ArithValue(_last < fx.Index(0)).select(fx.Index(0), _last))
+            return fx.Index(ArithValue(cand > _last).select(_last, cand))
+
+        _k_next = coop_load_k_global(_clamp_tile_start(fx.Index(BLOCK_N)))
+        _v_next = coop_load_v_global(_clamp_tile_start(fx.Index(BLOCK_N)))
 
         _pipe_init = [_raw(c_neg_inf), _raw(c_zero_f)]
         for _ in range_constexpr(D_CHUNKS):
             _pipe_init.append(_raw(c_zero_v8f32))
+        for _st in range_constexpr(NUM_S_ACCS):
+            _pipe_init.append(s0_accs[_st])
         for batch in range_constexpr(NUM_BATCHES_KV):
             _pipe_init.append(_k_next[batch])
         for batch in range_constexpr(NUM_BATCHES_KV):
@@ -523,24 +550,31 @@ def build_flash_attn_fp8_module(
             m_running = inner_iter_args[0]
             l_running = inner_iter_args[1]
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            s_prev = [
+                inner_iter_args[2 + D_CHUNKS + i] for i in range_constexpr(NUM_S_ACCS)
+            ]
             _k_vecs = [
-                inner_iter_args[2 + D_CHUNKS + b]
+                inner_iter_args[2 + D_CHUNKS + NUM_S_ACCS + b]
                 for b in range_constexpr(NUM_BATCHES_KV)
             ]
             _v_vecs_prefetch = [
-                inner_iter_args[2 + D_CHUNKS + NUM_BATCHES_KV + b]
+                inner_iter_args[2 + D_CHUNKS + NUM_S_ACCS + NUM_BATCHES_KV + b]
                 for b in range_constexpr(NUM_BATCHES_KV)
             ]
             _tile_id = kv_block_start // fx.Index(BLOCK_N_OUT)
             _buf = _tile_id % fx.Index(3)
+            _nbuf = (_tile_id + fx.Index(1)) % fx.Index(3)
 
-            # ==== staged 实验：迭代开头存本 tile 的 K/V 再 barrier ====
-            coop_store_k_lds(_k_vecs, _buf)
-            coop_store_v_lds(_v_vecs_prefetch, _buf)
+            # 1) 存 K/V[t+1]；barrier 只汇合这两组 LDS store——计算链不被切断
+            coop_store_k_lds(_k_vecs, _nbuf)
+            coop_store_v_lds(_v_vecs_prefetch, _nbuf)
             gpu.barrier()
+            # 2) GEMM1[t+1] 先发射（K[t+1] 刚 barrier 完）；
+            #    与下面的 softmax[t] 无数据依赖，硬件重叠执行
+            s_next_accs = _gemm1(k_buf_base(_nbuf))
 
-            # ==== GEMM1: S = K @ Q^T (fp8 x fp8) ====
-            s_accs = _gemm1(k_buf_base(_buf))
+            # 3) softmax[t] 消费上一迭代携带的 S[t]
+            s_accs = s_prev
 
             # ==== Online softmax (fp32) ====
             s_raw = []
@@ -639,10 +673,13 @@ def build_flash_attn_fp8_module(
             m_running = m_new_raw
             l_running = l_new
 
-            next_kv_start = kv_block_start + fx.Index(BLOCK_N_OUT)
-            _k_load = coop_load_k_global(next_kv_start)
-            _v_load = coop_load_v_global(next_kv_start)
+            # 4) 预取 K/V[t+2]（越界折回最后 tile，数据不消费只为防 OOB）
+            _next2 = _clamp_tile_start(kv_block_start + fx.Index(2 * BLOCK_N_OUT))
+            _k_load = coop_load_k_global(_next2)
+            _v_load = coop_load_v_global(_next2)
             _yield_args = [m_running, l_running] + o_accs
+            for _st in range_constexpr(NUM_S_ACCS):
+                _yield_args.append(s_next_accs[_st])
             for batch in range_constexpr(NUM_BATCHES_KV):
                 _yield_args.append(_k_load[batch])
             for batch in range_constexpr(NUM_BATCHES_KV):

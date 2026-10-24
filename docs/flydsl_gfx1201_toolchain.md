@@ -211,3 +211,36 @@ TF @8K/32K）。**faithful_l 默认改为 False**。教训：量化域一致性
   5 档延迟基准正常（8x64 14.3ms … 200x512 6177.8ms）；
 - 默认：transposed V(pad4) + **cheap_l（×448 补偿）** + kv_merge=1 +
   sw_pipeline=False。
+
+### 附5 补记：计算流水轮（2026-10-25，回答"softmax 还能不能优化"）
+
+**softmax 指令级已到顶**：max 链已 max3 融合、校正已 dual-issue、xor-16
+shuffle 是跨 lane 行最大值的算法必需（两半行各自归一化会使 PV 的 wmma
+内部求和比例失配）。剩余空间全在结构——本轮把四个结构方案做全：
+
+| 方案 | 结构达成 | 数值 | 性能 |
+|---|---|---|---|
+| kv_merge=2（前夜） | ✓ | ✓ | 持平 |
+| 计算流水（S[t] 寄存器跨迭代携带，GEMM1[t+1] 先于 softmax[t] 发射；ISA 确认 softmax 被调度到 barrier 前、GEMM1[t+1]/GEMM2[t] wmma 完全交错） | ✓ | ✓（Δ 与 legacy 逐位同级） | 持平（11.48 vs 11.3-11.5） |
+| GEMM1 累加链拆分（8 深→双 4 深） | ✓ | ✓ | 持平 |
+| K pack 全量预装载（16 个 LDS load 先发再统一 wmma） | ✓ | ✓ | 持平 |
+
+**结论：每迭代 ~1200cyc 的串行墙对单点结构修改不敏感**——不是 wmma 累加
+链深、不是 barrier 数量、不是 LDS-wmma 等待、GEMM2 排空也已被计算流水
+藏住。剩余嫌疑（waves_per_eu=1 驻留 × 8 wave 工作组的 barrier 抖动 /
+wmma 发行串行化）需要 rocprof/PMC 硬件计数器才能分解，pip SDK 不带。
+真正的下一台阶大概率是 **warp specialization**（softmax 与 GEMM 分属
+不同 warp 角色，barrier 变成角色间握手而不是串行链中段）——aiter 的
+bf16 kernel 也是单 warp 循环结构，同样没做。
+
+**修正昨晚归因**：本轮 packs 同样跨 barrier（调度器把 softmax 提前到
+barrier 之前）且数值无损——昨晚 reorder 版的 Δ×10 不能简单归因"packs
+过 barrier"，具体诱因未再现（该结构已重写为计算流水版，未保留复现）。
+
+**新 bug 修复**：计算流水的越界预取 clamp 初版用 `seq_len-32` 不是对齐
+tile 起点，把合法最后 tile 错钳成错位数据（S=2050 Δ 0.0036）——改为
+`((seq_len-1)//32)*32` 后复原。计算流水路径保留（sw_pipeline=True），
+默认仍 legacy；小 S 下流水版 prologue 付出额外 ~10% 不划算。
+
+**已验证不赚的（别再试）**：l 的 peer shuffle 移到 epilogue 只省 issue
+槽不省延迟（l 链本就不在关键路径上，corr 只依赖 m）。
