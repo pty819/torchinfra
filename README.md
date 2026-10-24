@@ -220,6 +220,9 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
   短 prompt 基准不变（B=32 5240）。差分测试补长序列组（600/512/700）
   覆盖 SDPA 路径，21 测试全绿。
 
+- [x] P13 — Nemotron-3.5-Rerank-8B（ministral3 双向塔）移植 fp8+Triton，
+  32K 全长可用（详见文末 P13 节）
+
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
 | 阶段 | 单流 tok/s | 并发 B=8 tok/s |
@@ -373,3 +376,66 @@ _fused_kernel 深层链翻转 bug 同款现象，长链触发、对拍拦截）�
 结论：该前向的 kernel 数问题只能靠手工融合（同 P8 的 custom-op 边界
 哲学），compile 路线在此栈（gfx1201 + 裸 triton kernel + fp8）判死。
 
+
+## P13 — Nemotron-3.5-Rerank-8B 移植（ministral3 双向塔 + FP8 + 32K，2026-10-24）
+
+`torchinfra/nemotron_rerank.py`：NVIDIA Nemotron-3.5-Rerank-8B（Mistral3
+序列分类壳 + ministral3 文本塔，34 层 / hidden 4096 / 32Q8KV×128 /
+SwiGLU 14336）从 transformers 5.12.1 逐条移植到 torchinfra fp8 栈。
+架构要点（与 jina 骨干的三处关键差异）：**全双向注意力**（无 is_causal）；
+**无 qk-norm**；yarn rope（factor 16 / base 1e6 / orig 16K，float32 全程
+逐位对齐 `_compute_yarn_parameters`）+ llama-4 Q attn-scale（pos<16K 恒 1，
+kernel 用 constexpr 关掉；16K–32K 段 ≈1.069 只乘 Q）。打分 = final
+RMSNorm → mask mean-pool → fp32 Linear(4096→1)。
+
+性能设计与实测（B=1，`tools/bench_nemotron.py`）：
+
+| S | 路径 | 延迟 | tok/s | 峰值显存 |
+|---|---|---|---|---|
+| 512 | CUDA graph | 64.5ms | 7936 | 8.31 GiB |
+| 2048 | CUDA graph | 258.7ms | 7916 | 8.39 GiB |
+| 8192 | SDPA flash | 1428ms | 5736 | 9.51 GiB |
+| 16384 | SDPA flash | 3932ms | 4167 | 10.07 GiB |
+| 32768 | SDPA flash | 12182ms | 2690 | 10.51 GiB |
+
+B=8×2048 掩码批（自研双向 kernel）2141ms ≈ 7651 tok/s，只比同长 flash
+图路径慢 3%。权重 7.98GiB（fp8 8.8GB checkpoint，QKV/gate-up 融合单
+GEMM），**32K 全长在本卡成立**（12GB 卡实测峰值 10.5GiB）。
+
+kernel 组成（榨性能的取舍全部有实测依据）：GEMM 清一色
+`torch._scaled_mm` tensorwise fp8（P12 生产者 amax partial 直喂）；
+无掩码注意力走 SDPA flash（此卡天花板，S=32K 实测 146.5TF）；**新写两个
+Triton kernel**：① `_rope_qkv_kernel`（yarn rope + llama4 scale +
+[B*S,6144]→[B,H,S,D] 转置一趟，q/k/v 三份输出直出 SDPA 布局）；
+② `_bidir_attn_kernel`（FA2 式在线 softmax 双向注意力，右 padding vlen
+掩码，pad 行写零防污染 tensorwise amax，逐 tile amax partial 直喂
+o_proj 量化）——存在理由：**ROCm 上 SDPA 带 attn_mask 时 flash 与
+efficient 双双 "No available kernel"，掉 math 后端物化 [B,H,S,S]**
+（B=2 S=3K 就是 7 倍慢，32K 直接 OOM），所以凡掩码路径必须自研。
+MLP 在 B*S>8192 时沿行分块（gu [S,28672] 的 1.9GB 峰值压到 448MB）；
+B=1 且 S≤2048 走 CUDA graph 分桶（右 padding 256 对齐，vlen 走
+static tensor replay 时改写），更大 S 图收益抵不过自研 kernel 与
+flash 的差距，走 eager flash。
+
+精度（`tools/test_nemotron_e2e.py`，vs CPU bf16 transformers 参考 8 对）：
+max|Δ|=0.091（阈值 0.3），**打分排序全保**；等长 batch 逐位一致；
+右 padding batch vs 单条 Δ≤0.025——非 bug，是 tensorwise fp8 固有
+（整批一个 scale，批组成变则同伴文档的量化步长跟着变），各自离 bf16
+参考仍 <0.05。yarn 表 float32 逐位对齐 transformers（float64 反而有
+6e-8 偏差）。参考生成 `tools/nemotron_cpu_ref.py`（CPU bf16 eager）。
+
+**踩坑两记（本轮最大成本，都值得进族谱）**：
+① **stride(0) 语义陷阱**：rope kernel 按 [B*S, C] 展平行寻址，调用处传
+了三维 qkv 的 `stride(0)`（=S·C≈1.5M 而非 C=6144）——二维单元测试里
+恰好等于 C，掩盖了 bug；真实三维跑直接越界读出
+HSA_STATUS_ERROR_MEMORY_FAULT。**故障表现极具欺骗性**：队列被打挂后
+`synchronize()` 在 CPU 上单核 100% 死等，GPU 空闲风扇不转，看起来像
+"调优在 CPU 上转"——曾误诊为 TunableOp 现场 tuning 并为此关了
+TUNING=1（该改动保留：调优 kernel 混进图捕获同样会打挂队列）。
+真定位靠 `HIP_LAUNCH_BLOCKING=1` 前台探针逐 kernel 打点（/tmp/probe
+式），错误当场在 launch 点爆出 kernel 名。教训：**单元测试的张量形状
+必须和生产完全一致（含维数），否则 stride 类参数验证是空谈**。
+② **32K OOM 的真凶是分配器碎片**：权重+工作集本可塞下（10.5<11.9GiB），
+但 qkv 384MB / gu 448MB 大块反复进出后固定尺寸缓存器留了 ~900MB
+reserved-unallocated 碎片。`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+（模块头 setdefault）+ rope 后立刻 `del qkv` 后 32K 稳定通过。

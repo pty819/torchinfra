@@ -201,9 +201,12 @@ def save_fp8_checkpoint_sharded(src: str | Path, dst: str | Path) -> Path:
     }
     (dst / "config.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
 
-    # 其余文件（model.py / chat_template / tokenizer / sentence-transformers 配置等）全量复制
+    # 其余文件（model.py / chat_template / tokenizer / sentence-transformers 配置等）
+    # 全量复制。index 除外（后缀是 .json 不是 .safetensors，曾把刚生成的
+    # fp8 index 覆盖回 bf16 原版，loader 因此找不到 weight_scale）。
     for p in src.iterdir():
-        if p.is_file() and p.suffix not in (".safetensors",) and p.name != "config.json":
+        if p.is_file() and p.suffix != ".safetensors" \
+                and p.name not in ("config.json", "model.safetensors.index.json"):
             shutil.copy2(p, dst / p.name)
     for d in src.iterdir():
         if d.is_dir():
