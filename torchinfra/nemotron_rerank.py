@@ -309,16 +309,14 @@ BIDIR_STAGES = 1
 FP8_MAX = 448.0        # e4m3 最大有限值
 # eager 无 mask 从 S>2048 开始（=GRAPH_MAX+1），之下注意力占比 <2% 不值得冒险
 FP8_ATTN_MIN_S = 2049
-# 实测结论（2026-10，ROCm 10.1 + Triton，gfx1201）：fp8 注意力精度门禁
-# 全过（E2E Δ=0.0307，与不走 fp8 的 0.0403 持平），但吞吐打不过 CK 的
-# bf16 flash：原始 fp8 MMA 241TF → 带 load 的 dot 循环上限 ~117TF →
-# 在线 softmax + P 操作数 staging 后 ~55TF，flash 有效 76TF（32K 端到端
-# 16.1s vs 12.2s）。根因是 Triton 表达不了 warp-specialized 流水：P 是
-# 算出来的（accumulator 布局），必须绕 SMEM 转成 MMA 操作数布局；TK=128
-# 时 PV 收缩维疑似超 fp8 MMA 宽度限制直接掉到 1/3；num_stages≥2 反而
-# 减半。路径保留（kernel 正确性由 tools/test_fp8_attn.py 持续把关），
-# 等 Triton/ROCm 补上 warp specialization / TMA 后置 False 重验即可。
-FP8_ATTN_DISABLED = True
+# 实测演进（gfx1201）：P14 的 Triton fp8 注意力精度全过（E2E Δ=0.0307）
+# 但吞吐 55TF 打不过 CK bf16 flash 76TF，封存。2026-10-24 起切换到
+# FlyDSL 自研 kernel（flydsl_kernels/，aiter bf16 flash 骨架 + 双 fp8
+# WMMA 16x16x16 + P×448 自洽量化 + 零同步 device scale）：GQA 32Q/8KV
+# 实测 84–88 TF（vs bf16 flash 55–76），32K 单层 322→206ms，已启用。
+# 旧 Triton kernel 保留为对照（tools/test_fp8_attn.py 持续把关）。
+FP8_ATTN_DISABLED = False
+FP8_ATTN_BACKEND = 'flydsl'  # 'flydsl' | 'triton' 
 FA8_TQ = 64
 FA8_TK = 64
 FA8_WARPS = 4
@@ -540,6 +538,16 @@ class NemotronReranker:
         scl.copy_(torch.stack((sq, sk, sv)))
         _rope_qkv_fp8_kernel[grid](*args, QUANT=True, **common)
         del pos
+        if FP8_ATTN_BACKEND == 'flydsl':
+            from flydsl_kernels.fp8_wrapper import flydsl_flash_attn_fp8
+            # log2e 折进 device scale（flydsl kernel 内走原生 exp2）
+            scl2 = torch.stack((sq * sk * (HD ** -0.5) * 1.4426950408889634, sv))
+            out = flydsl_flash_attn_fp8(
+                q8, k8, v8, scl=scl2, num_kv_heads=NKV)
+            # o_proj 量化的 amax：min/max 双归约，零中间张量
+            # （TODO：并入 kernel epilogue 可再省一趟读）
+            apart = torch.maximum(out.min().abs(), out.max()).float()
+            return out, apart
         scl2 = torch.stack((sq * sk * (HD ** -0.5), sv))
         out = torch.empty(B, S, NQ * HD, dtype=torch.bfloat16, device=dev)
         nt = triton.cdiv(S, FA8_TQ)

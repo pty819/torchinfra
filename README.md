@@ -222,6 +222,51 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 
 - [x] P13 — Nemotron-3.5-Rerank-8B（ministral3 双向塔）移植 fp8+Triton，
   32K 全长可用（详见文末 P13 节）
+- [x] P15 — aiter FlyDSL bf16 flash attention 移植与工具链打通（2026-10-24）
+  vendor 进 `flydsl_kernels/`（零 aiter C++ 依赖）。**关键根因**：MLIR HSACO
+  序列化靠 ROCM_PATH 定位 lld，TheRock pip SDK 无人设它——三套 MLIR 构建因此
+  全灭（"lld invocation failed"）；修法全在 `flydsl_kernels/__init__.py`
+  （FLYDSL_GPU_ARCH/ROCM_PATH/FLYDSL_COMPILE_LLVM_DIR → in-venv AMD LLVM
+  24.0git）。基准 [1,32,S,128] bf16 vs SDPA flash（同口径）：S=2048
+  **75.8 TF（1.04x）**、S=8192 **1.21x**、S=32K 持平，精度 Δ=1e-4；
+  BM=128/BN=32 出厂即最优。细节 `docs/flydsl_gfx1201_toolchain.md`。
+  **fp8 地基同日验证**：gfx1201 的 fp8 WMMA = `wmma_f32_16x16x16_fp8_fp8`
+  （v2i32 碎片，x64/x128 是 gfx1250 专属），裸指令速率实测 **266.7 TF**
+  （超 P14 Triton 裸 dot 的 241）——fp8 注意力 fork 三块地基（指令/布局/编译链）齐。
+- [x] P16 — FlyDSL fp8 注意力上线（2026-10-24 深夜，`flydsl_kernels/`）
+  P14 数学 × aiter bf16 flash 骨架：双 `wmma_f32_16x16x16_fp8_fp8`（QK^T/PV），
+  P×448 寄存器量化（`cvt_pk_fp8_f32`）+ 分母同量化域（`cvt_pk_f32_fp8` 忠实
+  解码求和），descale 走 device 端 SCL 指针零同步（scale_q·k 折进 exp2 尺度，
+  scale_v 在 epilogue）；GQA 32Q/8KV 用纯寻址数学（BM=128=4 头×32 行，
+  wave 不跨头），padded KV 不读（真实 S 与 padded S 分离，任意 pad 安全）。
+  裸 kernel（[1,32,S,128]）：**84–88 TF**（bf16 flash 55–76，S=32K 单层
+  322→206ms）。**真模型 e2e（FP8S）：32K 12182→10871ms（1.12x）、16K
+  1.09x、8K 1.04x**，小 S 图路径与 B=8 双向批零回归；E2E 对拍
+  **max|Δ|=0.0403 = P13.1 基线持平**，排序全保，等长 batch 逐位一致。
+  `FP8_ATTN_BACKEND='flydsl'` 已设默认。**V 转置布局**（GPT/PR#4188 指路：
+  V^T 存 LDS [D][BN]，GEMM2 从 8 次 1B 标量读变 1 次 8B 向量读；store 侧
+  16×1B scatter——fp8 下读写比 16:1，与 bf16 版"转置更慢"的结论相反）：
+  kernel 90.6→**96.0 TF**（8K）、85.2→**90.2**（32K），e2e 32K
+  10871→**10492ms**（vs P13.1 基线 **1.16x**）。两个坑：转置 tile 的 LDS
+  尺寸必须按 D×stride 算（按 BN 算会越界——症状是精度降 18 倍而性能
+  "虚高"）；V_T pad=4 最优（pad=2 是 34B stride 的 bank 冲突陷阱，暴跌
+  至 33 TF）。消融：PV 段占 80% 时间，QK+softmax 仅 ~1.8ms@8K——下一
+  台阶在 P pack 依赖链与 warp specialization。待办：amax 并入 epilogue。
+  **P16.1 消融矩阵轮（同夜续）**：synth_p/no_pv/neither 三点全 3.86ms、
+  合体 11.7ms ⇒ 内核是**装载/exp2-pack/GEMM2 三段纯串行**（依赖串行非
+  吞吐瓶颈，VALU 只需 0.6ms 量级）。三实验一定案：① **kv_merge=2**
+  （跨 tile softmax 合并）实现正确但持平——GEMM1 段 ILP×2 被 GEMM2 的
+  C-累加链×2 抵消；② **cheap_l 转正**：修出历史 bug（分母漏乘 448，
+  Δ=6.24；旧记录 0.006 有误），补偿后 Δ 与 faithful 持平且 +3.2% →
+  **默认 faithful_l=False**，kernel 定版 **96.7/93.1 TF**（8K/32K，
+  Δ 0.0007/0.0004），e2e 对拍全绿；③ **sw_pipeline**（K/V 寄存器跨
+  barrier 暂存+3 buffer）：staged 版数值逐位干净但仅 +1.5%（与 cheap_l
+  重叠不叠加，默认关）；reorder 版（barrier 挪 pack/GEMM2 之间）撞
+  **疑似编译 bug**（Δ×10 均匀噪声，ISA 数据流逐段核对无误——cvt_pk
+  半寄存器写跨 barrier？），已回退。下一步若再战：计算本身的跨迭代
+  流水（S[t+1] 先于 GEMM2[t]，双 S 组+独立 o_acc 累加）。FlyDSL 新坑
+  两条：yield 循环不能嵌 if 分支（改写器丢绑定）、jit 里 kernel 调用
+  必须直呼其名。
 
 ## 性能演进总表（9070 GRE，Qwen3-0.6B bf16）
 
