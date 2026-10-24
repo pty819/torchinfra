@@ -473,3 +473,25 @@ qkv/gu，一个 tensorwise 激活 scale 本来就只算一次），但不需要�
 `~/models/Nemotron-3.5-Rerank-8B-FP8S`（推荐，8.8GB，与 FP8 同尺寸）。
 bench 与 P13 基线持平（S=512 64.3ms/7964 tok/s … 32K 12171ms），等长
 batch 恢复逐位一致（Δ=0.00e+00）。
+
+### serving：Nemotron 走同一套 /v1/rerank（P13.2，2026-10-24）
+
+    PYTHONPATH=. nohup ~/rocm10/bin/python -m torchinfra.rerank_server \
+        --host 0.0.0.0 --port 8000 \
+        --model ~/models/Nemotron-3.5-Rerank-8B-FP8S &
+
+`--backend auto` 按 config.json 的 architectures 判别（*
+ForSequenceClassification → Nemotron pointwise，否则 jina bi-encoder），
+HTTP 层完全复用；调度器按模型各有一套 `_run`：jina（bi-encoder，左
+padding + embedding/分块合并）不动，新增 `NemotronScheduler`（pointwise
+cross-encoder，**右 padding**）——复用队列/合并/两遍编码/长度分组全套
+策略：小块（≤512）相近长度右 padding 拼批走自研双向掩码 kernel，大块
+只与等长块拼（保 flash），单块 B=1 吃 CUDA graph 分桶；超 32K 的对由
+`encode_pair_ids` 截断到 rope 表容量。返回原始 logit（Nemotron 官方
+语义，非 0-1 分数，越大越相关）。
+
+实测（FP8S，含 HTTP/调度/模板渲染）：100 篇中等（10.7K tok）1.37s ≈
+**7.8K tok/s**；8 并发×10 篇 0.99s ≈ **8.7K tok/s**；15.7K tok 单文档
+3.85s（与裸模型 bench 3927ms 吻合，serving 层零损耗）。与 jina（0.6B
+bi-encoder，46-60K tok/s）同接口共存：8B cross-encoder 逐对精排代价
+高 ~6 倍，换来的是交叉注意力精度档位——两者按场景选型即可。

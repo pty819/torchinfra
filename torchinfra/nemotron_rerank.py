@@ -470,21 +470,32 @@ class NemotronReranker:
 
     # ---- 对外 API ----
 
+    def encode_pair_ids(self, query: str, document: str) -> list[int]:
+        """官方 chat template（query/document 两条消息）→ token id 列表。
+
+        超过 rope 表容量的对截断到 max_pos（32K；模板前缀保留、尾部截）。
+        serving 调度器的两遍编码第一遍直接用它拿真实长度。"""
+        msgs = [{"role": "query", "content": [{"type": "text", "text": query}]},
+                {"role": "document", "content": [{"type": "text", "text": document}]}]
+        enc = self.tok.apply_chat_template(
+            msgs, tokenize=True, add_generation_prompt=False, return_dict=True)
+        ids = enc["input_ids"]
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        if ids and isinstance(ids[0], list):
+            ids = ids[0]
+        return ids[:self.max_pos]
+
     @torch.no_grad()
     def rerank(self, query: str, documents: list[str],
                top_n: int | None = None) -> list[dict]:
-        """单 query 对多文档逐对打分（pointwise），返回按 logit 降序。"""
-        msgs = [[{"role": "query", "content": [{"type": "text", "text": query}]},
-                 {"role": "document", "content": [{"type": "text", "text": d}]}]
-                for d in documents]
+        """单 query 对多文档逐对打分（pointwise），返回按 logit 降序。
+
+        逐条 B=1 前向（小 S 吃 CUDA graph）；并发/拼批路径用
+        rerank_server.NemotronScheduler。"""
         scores = []
-        for m in msgs:
-            enc = self.tok.apply_chat_template(
-                m, tokenize=True, add_generation_prompt=False,
-                return_dict=True, return_tensors="pt")
-            ids = enc["input_ids"].to("cuda")
-            if ids.shape[1] > self.max_pos:
-                raise ValueError(f"对长 {ids.shape[1]} 超过 {self.max_pos}，需截断")
+        for d in documents:
+            ids = torch.tensor([self.encode_pair_ids(query, d)], device="cuda")
             scores.append(float(self.score_ids(ids)))
         order = sorted(range(len(documents)), key=lambda i: scores[i],
                        reverse=True)
