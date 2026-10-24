@@ -156,6 +156,87 @@ def _rope_qkv_kernel(
                      vv.to(VO.dtype.element_ty), mask=rm[:, None])
 
 
+@triton.jit
+def _rope_qkv_fp8_kernel(
+    QKV, COS, SIN, POS, QO, KO, VO, SCL, PARTQ, PARTK, PARTV,
+    s_row, s_cos, n_rows, seq, kc, vc,
+    NQ: tl.constexpr, NKV: tl.constexpr, D: tl.constexpr,
+    HALF: tl.constexpr, TR: tl.constexpr, L4SC: tl.constexpr,
+    ORIG: tl.constexpr, BETA: tl.constexpr, QUANT: tl.constexpr,
+):
+    """_rope_qkv_kernel 的 fp8 版：同一份 rope 数学，两遍调用。
+
+    tensorwise fp8 scale 要先知道全局 amax，单遍做不到——QUANT=0 遍只写
+    rope 后 q/k/v 的 per-program amax partial（kc/vc 修正后的真值），
+    host 归约出 sq/sk/sv 后 QUANT=1 遍重算同样的寄存器值、除以各自
+    scale 直接落 fp8 [B,H,S,D]。相比"rope 出 bf16 再补一次量化"省掉
+    384MB/层（32K）的 bf16 中间缓冲和一趟搬运。
+    """
+    rb = tl.program_id(0)
+    h = tl.program_id(1)
+    rows = rb * TR + tl.arange(0, TR)
+    rm = rows < n_rows
+    bi = rows // seq
+    row = rows - bi * seq
+    off = tl.arange(0, HALF)
+    pos = tl.load(POS + rows, mask=rm, other=0)
+    cs = pos[:, None] * s_cos + off[None, :]
+    cos = tl.load(COS + cs, mask=rm[:, None], other=0.0)
+    sin = tl.load(SIN + cs, mask=rm[:, None], other=0.0)
+
+    qb = rows[:, None] * s_row + h * D
+    a = tl.load(QKV + qb + off[None, :], mask=rm[:, None], other=0.0)
+    b = tl.load(QKV + qb + HALF + off[None, :], mask=rm[:, None], other=0.0)
+    qa = a * cos - b * sin
+    qb2 = b * cos + a * sin
+    if L4SC:
+        qs = 1.0 + BETA * tl.log(1.0 + tl.floor(pos.to(tl.float32) / ORIG))
+        qa = qa * qs[:, None]
+        qb2 = qb2 * qs[:, None]
+    if QUANT:
+        invq = 1.0 / tl.load(SCL + 0)
+        db = ((bi[:, None] * NQ + h) * seq + row[:, None]) * D
+        tl.store(QO + db + off[None, :], (qa * invq).to(QO.dtype.element_ty),
+                 mask=rm[:, None])
+        tl.store(QO + db + HALF + off[None, :],
+                 (qb2 * invq).to(QO.dtype.element_ty), mask=rm[:, None])
+    else:
+        tl.store(PARTQ + rb * NQ + h,
+                 tl.max(tl.maximum(tl.abs(qa), tl.abs(qb2))))
+
+    if h < NKV:
+        koff = rows[:, None] * s_row + NQ * D + h * D
+        ka = tl.load(QKV + koff + off[None, :], mask=rm[:, None],
+                     other=0.0).to(tl.float32) * kc
+        kb = tl.load(QKV + koff + HALF + off[None, :], mask=rm[:, None],
+                     other=0.0).to(tl.float32) * kc
+        kra = ka * cos - kb * sin
+        krb = kb * cos + ka * sin
+        kdb = ((bi[:, None] * NKV + h) * seq + row[:, None]) * D
+        if QUANT:
+            invk = 1.0 / tl.load(SCL + 1)
+            tl.store(KO + kdb + off[None, :],
+                     (kra * invk).to(KO.dtype.element_ty), mask=rm[:, None])
+            tl.store(KO + kdb + HALF + off[None, :],
+                     (krb * invk).to(KO.dtype.element_ty), mask=rm[:, None])
+        else:
+            tl.store(PARTK + rb * NKV + h,
+                     tl.max(tl.maximum(tl.abs(kra), tl.abs(krb))))
+        vpart = 0.0
+        vb = rows[:, None] * s_row + (NQ + NKV) * D + h * D
+        for dd in range(0, D, HALF):
+            vv = tl.load(QKV + vb + dd + off[None, :], mask=rm[:, None],
+                         other=0.0).to(tl.float32) * vc
+            vpart = tl.maximum(vpart, tl.max(tl.abs(vv)))
+            if QUANT:
+                invv = 1.0 / tl.load(SCL + 2)
+                tl.store(VO + kdb + dd + off[None, :],
+                         (vv * invv).to(VO.dtype.element_ty),
+                         mask=rm[:, None])
+        if not QUANT:
+            tl.store(PARTV + rb * NKV + h, vpart)
+
+
 class _Layer:
     def __init__(self):
         self.raw: dict[str, torch.Tensor] = {}
@@ -223,6 +304,85 @@ BIDIR_TQ = 64
 BIDIR_TK = 64
 BIDIR_WARPS = 4
 BIDIR_STAGES = 1
+
+# ---- fp8 注意力（无 mask 大 S 路径）----
+FP8_MAX = 448.0        # e4m3 最大有限值
+# eager 无 mask 从 S>2048 开始（=GRAPH_MAX+1），之下注意力占比 <2% 不值得冒险
+FP8_ATTN_MIN_S = 2049
+# 实测结论（2026-10，ROCm 10.1 + Triton，gfx1201）：fp8 注意力精度门禁
+# 全过（E2E Δ=0.0307，与不走 fp8 的 0.0403 持平），但吞吐打不过 CK 的
+# bf16 flash：原始 fp8 MMA 241TF → 带 load 的 dot 循环上限 ~117TF →
+# 在线 softmax + P 操作数 staging 后 ~55TF，flash 有效 76TF（32K 端到端
+# 16.1s vs 12.2s）。根因是 Triton 表达不了 warp-specialized 流水：P 是
+# 算出来的（accumulator 布局），必须绕 SMEM 转成 MMA 操作数布局；TK=128
+# 时 PV 收缩维疑似超 fp8 MMA 宽度限制直接掉到 1/3；num_stages≥2 反而
+# 减半。路径保留（kernel 正确性由 tools/test_fp8_attn.py 持续把关），
+# 等 Triton/ROCm 补上 warp specialization / TMA 后置 False 重验即可。
+FP8_ATTN_DISABLED = True
+FA8_TQ = 64
+FA8_TK = 64
+FA8_WARPS = 4
+FA8_STAGES = 1
+
+
+@triton.jit
+def _fp8_attn_kernel(
+    Q, K, V, O, PART, SCL, S,
+    NQ_PER_KV: tl.constexpr, D: tl.constexpr,
+    TQ: tl.constexpr, TK: tl.constexpr, PMAX: tl.constexpr,
+):
+    """全双向注意力，Q/K/V 全 fp8（gfx1201 fp8×fp8 MMA 241TF，是 bf16 两倍）。
+
+    QK^T 与 PV 都走 fp8 dot、fp32 累加（RDNA4 硬件行为，out_dtype=bf16
+    反而编不过）。SCL=[smq, sv]：smq=sq·sk/√D 一次性反量化 scores；
+    softmax 全程 fp32；P 按行 max 归一后 ×448 量化回 fp8 喂 PV（FA3 式，
+    p≤1 不会溢出），分母 l 也用量化后的 P 求和——分子分母同在量化域，
+    ×448 相消，O = acc·sv/l，量化噪声变成自洽的相对噪声而不是系统性
+    偏差。输出 bf16 [B,S,H*D] 直写 + PART amax partial（真值单位，喂
+    o_proj 的 tensorwise 量化；pad 行记 0）。
+    """
+    b = tl.program_id(0)
+    h = tl.program_id(1)
+    t = tl.program_id(2)
+    H = tl.num_programs(1)
+    kv_h = h // NQ_PER_KV
+    smq = tl.load(SCL + 0) * 1.4426950408889634   # 折进 log2e：exp→原生 exp2
+    sv = tl.load(SCL + 1)
+    offs_q = t * TQ + tl.arange(0, TQ)
+    offs_d = tl.arange(0, D)
+    qm = offs_q < S
+    q = tl.load(Q + ((b * H + h) * S + offs_q[:, None]) * D + offs_d[None, :],
+                mask=qm[:, None], other=0.0)
+    m_i = tl.full([TQ], -1.0e30, dtype=tl.float32)
+    l_i = tl.zeros([TQ], dtype=tl.float32)
+    acc = tl.zeros([TQ, D], dtype=tl.float32)
+    kv_base = (b * (H // NQ_PER_KV) + kv_h) * S
+    for ks in range(0, S, TK):
+        offs_k = ks + tl.arange(0, TK)
+        km = offs_k < S
+        # K 转成 [D, TK] 供 dot（fp8 tile 直接转置 load 会算错，必须 load
+        # 自然布局再 tl.trans）
+        k = tl.load(K + (kv_base + offs_k[:, None]) * D + offs_d[None, :],
+                    mask=km[:, None], other=0.0)
+        qk = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * smq
+        qk = tl.where(km[None, :], qk, -1.0e30)
+        m_new = tl.maximum(m_i, tl.max(qk, 1))
+        p = tl.where(km[None, :], tl.exp2(qk - m_new[:, None]), 0.0)
+        alpha = tl.exp2(m_i - m_new)
+        pq = tl.minimum(p * PMAX, PMAX).to(K.dtype.element_ty)
+        l_i = l_i * alpha + tl.sum(pq.to(tl.float32), 1)
+        acc = acc * alpha[:, None]
+        v = tl.load(V + (kv_base + offs_k[:, None]) * D + offs_d[None, :],
+                    mask=km[:, None], other=0.0)
+        acc += tl.dot(pq, v, out_dtype=tl.float32)
+        m_i = m_new
+    # acc 与 l 都在 P 量化域（×448 相消）：O_true = acc·sv / l
+    o = acc * (sv / l_i)[:, None]
+    obz = tl.where(qm[:, None], o, 0.0)
+    tl.store(O + (b * S + offs_q[:, None]) * (H * D) + h * D + offs_d[None, :],
+             obz.to(O.dtype.element_ty), mask=(offs_q < S)[:, None])
+    nt = tl.cdiv(S, TQ)
+    tl.store(PART + (b * H + h) * nt + t, tl.max(tl.abs(obz)))
 
 
 def _load_tower_fp8(model_dir: Path):
@@ -315,9 +475,15 @@ class NemotronReranker:
     # ---- 前向 ----
 
     def _attn_block(self, ly: _Layer, x, B, S, vlen):
-        """vlen None → 无 padding 走 SDPA flash；否则右 padding 走自研双向 kernel。"""
+        """vlen None → 无 padding：S≥FP8_ATTN_MIN_S 走 fp8 注意力，小 S 走
+        SDPA flash（小 S 注意力占比 <2%，图路径也不动）；有 padding 走自研
+        双向 kernel（bf16）。"""
         h, ph = triton_rmsnorm_amax(x, ly.ln1, EPS)
         qkv = fp8_linear_q(h, ly.w_qkv_fp8, ly.w_qkv_s, ph)
+        if vlen is None and S >= FP8_ATTN_MIN_S and not FP8_ATTN_DISABLED:
+            r = self._attn_fp8(ly, qkv, B, S)
+            del qkv
+            return r
         cos, sin = self.cos, self.sin
         half = HD // 2
         q = torch.empty(B, NQ, S, HD, dtype=qkv.dtype, device=x.device)
@@ -344,6 +510,44 @@ class NemotronReranker:
             NQ_PER_KV=NQ // NKV, D=HD,
             TQ=BIDIR_TQ, TK=BIDIR_TK,
             num_warps=BIDIR_WARPS, num_stages=BIDIR_STAGES)
+        return out, apart
+
+    def _attn_fp8(self, ly: _Layer, qkv, B, S):
+        """无 mask 大 S：Q/K/V 全 fp8 注意力。scale 全程留在 device，
+        零同步（该路径只在 eager 大 S 走，不进图）。"""
+        dev = qkv.device
+        qkv2 = qkv.view(B * S, -1)
+        pos = self.pos_cache(S, B, dev)
+        n_rb = triton.cdiv(B * S, ROPE_TR)
+        q8 = torch.empty(B, NQ, S, HD, dtype=torch.float8_e4m3fn, device=dev)
+        k8 = torch.empty(B, NKV, S, HD, dtype=torch.float8_e4m3fn, device=dev)
+        v8 = torch.empty(B, NKV, S, HD, dtype=torch.float8_e4m3fn, device=dev)
+        partq = torch.empty(n_rb, NQ, dtype=torch.float32, device=dev)
+        partk = torch.empty(n_rb, NKV, dtype=torch.float32, device=dev)
+        partv = torch.empty(n_rb, NKV, dtype=torch.float32, device=dev)
+        scl = torch.empty(3, dtype=torch.float32, device=dev)
+        grid = (n_rb, NQ)
+        common = dict(NQ=NQ, NKV=NKV, D=HD, HALF=HD // 2, TR=ROPE_TR,
+                      L4SC=S > ROPE_ORIG, ORIG=float(ROPE_ORIG), BETA=0.1,
+                      num_warps=ROPE_WARPS)
+        args = (qkv2, self.cos, self.sin, pos, q8, k8, v8, scl,
+                partq, partk, partv, qkv2.stride(0), self.cos.stride(0),
+                B * S, S, ly.kc, ly.vc)
+        _rope_qkv_fp8_kernel[grid](*args, QUANT=False, **common)
+        sq = (partq.amax() / FP8_MAX).clamp(min=1e-12)
+        sk = (partk.amax() / FP8_MAX).clamp(min=1e-12)
+        sv = (partv.amax() / FP8_MAX).clamp(min=1e-12)
+        scl.copy_(torch.stack((sq, sk, sv)))
+        _rope_qkv_fp8_kernel[grid](*args, QUANT=True, **common)
+        del pos
+        scl2 = torch.stack((sq * sk * (HD ** -0.5), sv))
+        out = torch.empty(B, S, NQ * HD, dtype=torch.bfloat16, device=dev)
+        nt = triton.cdiv(S, FA8_TQ)
+        apart = torch.empty(B, NQ, nt, dtype=torch.float32, device=dev)
+        _fp8_attn_kernel[(B, NQ, nt)](
+            q8, k8, v8, out, apart, scl2, S,
+            NQ_PER_KV=NQ // NKV, D=HD, TQ=FA8_TQ, TK=FA8_TK, PMAX=FP8_MAX,
+            num_warps=FA8_WARPS, num_stages=FA8_STAGES)
         return out, apart
 
     def _mlp_block(self, ly: _Layer, x, B, S):

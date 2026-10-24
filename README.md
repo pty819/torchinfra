@@ -495,3 +495,49 @@ cross-encoder，**右 padding**）——复用队列/合并/两遍编码/长度�
 3.85s（与裸模型 bench 3927ms 吻合，serving 层零损耗）。与 jina（0.6B
 bi-encoder，46-60K tok/s）同接口共存：8B cross-encoder 逐对精排代价
 高 ~6 倍，换来的是交叉注意力精度档位——两者按场景选型即可。
+
+### P14 — fp8 注意力：精度过关、吞吐封存（2026-10-24）
+
+目标：把 32K 时占 2/3 时间的 bf16 flash 注意力（有效 ~76 TF）换成
+fp8×fp8 MMA（实测原始速率 241 TF，是 bf16 的 2 倍）。完整实现并验证后
+**默认封存**——精度不是问题，是 Triton 在此栈上到不了那个速率。
+
+实现（`FP8_ATTN_DISABLED=False` 即启用）：
+
+- `_rope_qkv_fp8_kernel` 两遍式：A 遍只算 rope 后 q/k/v 的 per-program
+  amax partial（kc/vc 修正后的真值），host 归约出精确 tensorwise
+  scale，B 遍重算同样寄存器值、除以 scale 直接落 fp8 [B,H,S,D]——比
+  "rope 出 bf16 再补量化"省 384MB/层（32K）中间缓冲；
+- `_fp8_attn_kernel`：QK^T/PV 双 fp8 dot（fp32 累加，RDNA4 硬件行为），
+  在线 softmax 全 fp32；P 按行 max 归一后 ×448 量化回 fp8（FA3 式，
+  p≤1 无截断），**分母 l 也用量化后的 P 求和**——分子分母同在量化域、
+  ×448 相消，量化噪声成为自洽相对噪声（初版漏了这层相消，输出恰好小
+  448 倍，是很好的反面教材）；
+- 门控：无 mask eager 路径 S>2048 启用；图/双向掩码/小 S 路径不动。
+
+精度（全过）：单元对拍 d(dequant)=1.64%（纯 P 量化噪声，与理论一致）；
+rope 两遍式恰在量化界；**E2E 8 对 Δ=0.0307（fp8 注意力路径），与基线
+0.0403 持平甚至略好**，排序不翻、等长 batch 逐位一致。Q/K/V 全 fp8 在
+真实模型上无害——合成随机数据上 18% max 噪声（e4m3 逐元素 6% 与信号
+同速率累积，不被 √128 平均掉）在平滑注意力分布 + mean-pooling 下被
+吸收。
+
+吞吐（为何封存，gfx1201 + ROCm 10.1 + Triton 3.6）：
+
+| 阶段                                    | 速率（真实口径） |
+|-----------------------------------------|------------------|
+| 原始 fp8 dot（操作数驻留寄存器）         | 241 TF           |
+| 同结构循环 + 每 iter load K/V + trans     | ~117 TF          |
+| 再加在线 softmax + P 操作数 staging       | ~55 TF           |
+| CK bf16 flash（SDPA，参照）              | 76 TF            |
+
+端到端 32K 16.1s vs 12.2s（慢 32%），任何 S 无交叉点。三层瓶颈：
+P 是算出来的（MMA accumulator 布局），必须绕 SMEM 转成操作数布局，
+Triton 表达不了 CK 的 warp-specialized 流水；在线 softmax 的
+max→exp→量化→dot 串行依赖链（unroll2/跳过重缩放/w8/st≥2/TK=128/
+K 预转置全试过，全部持平或更差，TK=128 因 PV 收缩维疑似超 fp8 MMA
+宽度直接掉到 1/3）。kernel 与单测（`tools/test_fp8_attn.py`）保留，
+Triton/ROCm 补上 warp specialization / TMA 后置 False 重验即可。
+
+当前性能（FP8S，回退 flash 后）：S=512 64.4ms/7947 tok/s、S=8192
+1423ms、S=32768 12173ms（2692 tok/s），与 P13.1 基线逐项一致。
