@@ -586,3 +586,15 @@ Triton/ROCm 补上 warp specialization / TMA 后置 False 重验即可。
 
 当前性能（FP8S，回退 flash 后）：S=512 64.4ms/7947 tok/s、S=8192
 1423ms、S=32768 12173ms（2692 tok/s），与 P13.1 基线逐项一致。
+
+## P16.3 warp-split 实验归档（2026-10-25）
+
+FA2 式组内 KV 分治（wsplit，`flydsl_kernels/flash_attn_fp8_wsplit.py`）走通
+了全部基础设施（软 barrier 配方见 docs 附6 补记二/三），首版正确
+（Δ≤0.003）但 74.2/70.5 TF @8K/32K，未及 legacy；双缓冲两负结果（求和
+放宽=竞态；循环变化 LDS 基址=4× 微架构悬崖）后放弃。**生产保持 P16.x
+峰值版**：legacy + cheap_l（faithful_l=False, kv_merge=1, sw_pipeline=
+False），复验 Δ=0.0010 / 100.7 TF @8K / 93.9 TF @32K。wsplit 文件与工具
+（test_wsplit_wip.py / test_softbar_recipe.py / test_minload_carry.py）
+留档，未接入 fp8_wrapper 生产路径。重要遗留：legacy 旧"串行墙"消融结论
+被运行时基址悬崖污染（附6 补记三），若重启优化需先重评。
