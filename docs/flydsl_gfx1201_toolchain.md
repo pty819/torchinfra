@@ -244,3 +244,51 @@ tile 起点，把合法最后 tile 错钳成错位数据（S=2050 Δ 0.0036）�
 
 **已验证不赚的（别再试）**：l 的 peer shuffle 移到 epilogue 只省 issue
 槽不省延迟（l 链本就不在关键路径上，corr 只依赖 m）。
+
+## 附6：warp split（FA2 式组内 KV 分治）——原语全通，kernel 卡嵌套 while（2026-10-25）
+
+### 动机与设计
+32K 热点剖析（tools/profile_nemotron32k.py）：注意力 62% / GEMM 26%（已贴
+fp8 天花板 114-128 TF）。注意力的 ~1200cyc/tile 串行墙对四个单点结构修改
+全部免疫（附5）——根因是 8 wave 锁步同相位（softmax 时全 VALU、GEMM 时
+全 WMMA）。FA2 的解法 = warp 级任务划分。RDNA 上的可行形态：
+**BM=64、8 wave 分两组（wave w 认领第 w%4 个 query 头的 16 行，组 g=w//4），
+两组各吃奇/偶 KV tile 独立推进 (m,l,O)，末尾 LDS 合并**（寄存器与 legacy
+相同：每 wave 仍 16 行）。关键约束：RDNA 的 s_barrier 是 workgroup 级，
+组内同步必须用软 barrier；硬件 barrier 出现在分叉循环内 = 死锁。
+
+### 已验证的原语（微内核 tools/test_softbar_micro.py）
+1. **软 barrier 配方**：普通 LDS store → `memory_fence(SeqCst, workgroup)`
+   → LDS 原子 +1（AcqRel，全 lane 或 leader）→ 普通读自旋到目标 →
+   `memory_fence(SeqCst)`。**100/100 全过，~290ns/轮**（含校验读写）。
+   - 坑 1：顺序语义矩阵测出——**被保护数据用普通 store 时必须显式 SeqCst
+     fence 包夹**；依赖原子自身的 AcqRel/Release 会闪失（Data=SeqCst 时
+     0 失败，Release 时 5-36/40）——TheRock 路径下 atomicrmw 的 release
+     语义对普通 LDS 写不可靠。
+   - 坑 2：`atomicrmw(+0, Acquire)` 会被合法转成普通 load+fence——自旋
+     用普通 LDS 读即可（LDS 物理共享，不会永久滞留）。
+   - 坑 3：LDS 原子指针构造：`extract_base_index(memref)+偏移` →
+     `create_llvm_ptr(idx, address_space=3)`。
+2. **while 嵌运行时 if 分支 + 携带变量预绑定** → 编译通过（for+yield
+   嵌 if 会 NameError——附5 的坑对 while 不成立，但变量必须 if 之前先绑定）。
+
+### wsplit kernel（flydsl_kernels/flash_attn_fp8_wsplit.py，WIP）
+编译通过、运行不挂、MLIR 结构逐项核对正确（两组计数器 0/1/2/3 映射对、
+fence/barrier 序对、合并交换布局对）。**但 ~7% 输出 NaN**：组 0 单独输出
+（绕过合并）仍 NaN → 问题在组循环内部。已排除：tile 索引算术（i32/Index
+两版一样）、leader 原子嵌套（改全 lane 到达有改善但没除根）、merge 布局。
+**头号嫌疑：scf.while 嵌套 scf.while 的携带变量串扰**（自旋 while 在组
+循环 while 内；微内核的自旋在 for 内 100/100——改 while 复现时撞上改写器
+`__for_body_0` UnboundLocalError，未完成）。下一步：
+1. 最小复现嵌套 while 携带（for 外层 vs while 外层对照）；
+2. 若确认改写器 bug：自旋改有限展开（如 do-while 8 次一轮 + 外层再判）或
+   上游报告；
+3. 排除后接回 wrapper（warp_split 开关）做 8K/32K 对比——期望值待测
+   （理论上限 ~2×，barrier 开销 ~290ns/tile·组 吃掉一部分）。
+
+### 会话教训
+- 隔离测试要防"诊断输出被后续正常路径覆盖"（dbg 块后 merge 继续写 OUT，
+  一度误判 merge 无辜）。
+- FlyDSL 调试三件套已固化：AST yield-宿主映射查作用域、external_binary_
+  input.mlir 查结构、ISA 事件流查调度（工具见 tools/test_*_wip 与
+  flydsl-isa-dump-recipe 记忆）。
