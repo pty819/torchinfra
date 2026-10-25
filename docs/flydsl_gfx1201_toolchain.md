@@ -292,3 +292,49 @@ fence/barrier 序对、合并交换布局对）。**但 ~7% 输出 NaN**：组 0
 - FlyDSL 调试三件套已固化：AST yield-宿主映射查作用域、external_binary_
   input.mlir 查结构、ISA 事件流查调度（工具见 tools/test_*_wip 与
   flydsl-isa-dump-recipe 记忆）。
+
+### 附6 补记二：软 barrier 三层根因与最终配方（2026-10-24）
+
+附6 的 WIP 状态已全部翻案。当天完成根因链闭环 + wsplit 首次正确运行：
+
+**三层根因（全部 MLIR/ISA 实证）**
+1. **改写器静默丢弃无副作用的嵌套 while**。自旋 `while cur<tgt: cur=load`
+   体内无副作用、出口值无人使用 → 整个 while 被 DCE。wsplit 旧版 4 个自旋
+   全部没编译进二进制（bb 级验证：循环体 0 个 cond_br、全模块仅 2 个
+   atomicrmw=两次到达）→ 无任何等待 → 纯竞态 → ~7% NaN（未初始化 LDS 的
+   fp8 NaN 字节经 wmma 进 S）。**micro v1/v2 的"100/100 验证"与排序矩阵
+   全部作废**（自旋同样没编译进去，grid=1 八 wave 近同步运气通过；grid≥32
+   立刻大面积 stale 读）。
+   - 修复：自旋出口把观测值存 LDS keepalive 槽（副作用保活整条链）。
+2. **普通读自旋被 LICM 提升出循环** → 恒假条件 → 死循环挂死。修复：自旋读
+   改 Monotonic 原子读（atomic_add +0），原子读不可被提升。
+3. **SeqCst/Acquire 语义在 ROCDL 降级为每次 poll 发射 `s_wait_loadcnt_dscnt 0x0
+   + global_inv scope:SE`**，与循环内在飞的全局加载互锁 → 挂死（固定合法地址
+   也复现；纯 LDS 轮转不挂）。修复：全程零 memory_fence——到达用 lane0
+   **Release** 原子（序住 LDS store，无 acquire 半边），自旋用 **Monotonic**
+   原子读。LDS 硬件本身同一 wave 内按序完成（store→原子天然有序），跨 wave
+   原子可见即先行 store 可见。
+
+**其他当日发现**
+- for+yield 携带循环不能被 if/else 包裹调用（分支内包 while 丢自旋；wsplit
+  组参数全部改运行时算术走单路径 for）。旧"while 可嵌 if（携带变量预绑定）"
+  的结论只在自旋被丢弃的假象下成立。
+- waves_per_eu=1 + 8-wave workgroup 软 barrier 必死锁（2 wave/SIMD 才能全驻
+  留）；当前 wsplit 不设 wpe。
+- wsplit 组循环体 acc 多值携带在 micro v3 中仍见偶发 1-bit 级丢失（与 barrier
+  无关，NOBAR 也错；极小单携带对照 0/65536 全对）——改写器携带交互的又一
+  个未解问题，wsplit 输出未见受影响（Δ 一致）。
+- `seq_cst` 在 vendored MLIR 枚举里=7（不是 6），dump 时别当非法值。
+
+**wsplit 首版结果**（tools/test_wsplit_wip.py / bench）：
+- 正确性：S=128/512/2048 vs fp32 参考 Δ=0.0032/0.0017/0.0010（重复稳定）；
+  8K/32K vs legacy Δ=0.0006/0.0003。
+- 性能：59.6/74.2/70.3 TF @2K/8K/32K（legacy 同条件 140.1/99.7/93.4）。
+  差距来源已知：K/V 单缓冲（组循环 load→store→compute 串行）、V 转置存储
+  每线程 32×1B 散射、leader 到达（每轮仅 +4）、无 wpe 调优。
+- 后续优化梯子：双缓冲 K/V（真正的组间重叠）、全 lane 或按 wave 分计数器
+  到达、V LDS 存储向量化（16B 打包转置）、waves_per_eu 扫描。
+
+工具：`tools/test_softbar_recipe.py`（micro v3：排序矩阵 + keepalive + 原子
+自旋 + NOBAR 对照）、`tools/test_minload_carry.py`（极小携带对照）、
+`tools/test_softbar_micro.py`（已废弃结论，仅存档）。

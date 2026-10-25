@@ -1,17 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 torchinfra — FA2 式组内 KV 分治（warp split）实验 kernel。
 #
-# docs/flydsl_gfx1201_toolchain.md 附6。BM=64（4 query 头 × 16 行），
-# workgroup 256 线程 = 8 wave；wave w 认领第 (w%4) 个头的 16 行，组 g=w//4。
-# 两组独立推进各自 KV tile 流（组 0 偶数、组 1 奇数），各维护 (m,l,O)；
-# 组内同步 = LDS 原子软 barrier（leader 到达 + 普通读自旋 + SeqCst fence，
-# 微内核 100/100 验证），全程无硬件 barrier（会锁死两组相位）。循环用
-# while 嵌运行时 if（携带变量预绑定）。末尾 uniform 区硬 barrier 汇合，
-# 组 1 wave 写 (m,l,O) 到 LDS，组 0 伙伴读回做 softmax 合并：
+# docs/flydsl_gfx1201_toolchain.md 附6/附6补记。BM=64（4 query 头 × 16 行），
+# workgroup 256 线程 = 8 wave32；wave w 认领第 (w%4) 个头的 16 行，组 g=w//4。
+# 两组独立推进各自 KV tile 流（组 0 偶数、组 1 奇数），各维护 (m,l,O)，
+# 末尾硬件 barrier 汇合后组 1 写 (m,l,O) 到 LDS，组 0 伙伴读回做 softmax 合并：
 #   O = (O0·d0 + O1·d1)/(l0·d0 + l1·d1)·sv,  d_g = exp2((m_g-m*)·scale)
 #
-# LDS：cnt[4]@0 | g0 K@16 V@4240 | g1 K@8864 V@13088 | merge@17712
+# ── 组内软 barrier 最终配方（2026-10-24 定型，全链路 MLIR+ISA 实证）──
+# 1. 组循环必须是 for+yield 携带、不能被 if/else 分支包裹（改写器在分支内
+#    包 while 会静默丢弃嵌套 while——旧版 4 个自旋全没编译进去，纯竞态 NaN）。
+# 2. 自旋 while 体内必须保活（结束时把观测值存 LDS ka 槽）：无副作用的
+#    while 会被改写器当死代码删除。
+# 3. 自旋读必须用 Monotonic 原子读（atomic_add +0）：普通读会被 LICM 提出
+#    循环变成死循环；Acquire/SeqCst 会在每次 poll 发射 s_wait_loadcnt+
+#    global_inv(SE)，与在飞全局加载互锁死锁。
+# 4. 到达用 lane0 Release 原子（序住 LDS store，无 acquire 半边）；全程
+#    零 memory_fence。
+#
+# LDS：cnt[4]@0 | g0 K@16 V@4240 | g1 K@8848 V@13072 | merge@17680 | ka@50960
 #   每伙伴 wave 槽 = 32(m,l) + 2048(O) f32 = 8320B，共 4 槽 → ~50.9KB。
+#
+# 首版性能（vs legacy 同条件）：59.6/74.2/70.3 TF @2K/8K/32K
+# （legacy 140/99.7/93.4）。已知差距：K/V 单缓冲、V 转置存储是每线程
+# 32×1B 散射、leader 到达、无 wpe 调优。双缓冲/全 lane 到达/V 向量化
+# 是后续优化项。正确性：S≤2048 vs fp32 参考 Δ≤0.0032；8K/32K vs
+# legacy Δ≤0.0006。
 
 import math as host_math
 
@@ -45,14 +59,15 @@ LDS_G1 = LDS_G0 + K_TILE + V_TILE
 LDS_MERGE = LDS_G1 + K_TILE + V_TILE
 MERGE_F32_PER_WAVE = 32 + 2048
 MERGE_BYTES = MERGE_F32_PER_WAVE * 4 * 4
-LDS_TOTAL = LDS_MERGE + MERGE_BYTES
+KA_OFF = LDS_MERGE + MERGE_BYTES          # keepalive 槽：防 DCE 丢自旋
+LDS_TOTAL = KA_OFF + 4
 
 
 def build_flash_attn_fp8_wsplit_module(
     num_heads,
     head_dim,
     num_kv_heads=None,
-    waves_per_eu=1,
+    waves_per_eu=None,
     flat_work_group_size=WAVES * WARP,
     unsafe_fp_math=True,
     fast_fp_math=True,
@@ -133,6 +148,7 @@ def build_flash_attn_fp8_wsplit_module(
 
         lds = SmemPtr(allocator.get_base(), 0, T.i8, shape=(LDS_TOTAL,)).get()
         cnt_mr = SmemPtr(allocator.get_base(), 0, T.i32, shape=(4,)).get()
+        ka_mr = SmemPtr(allocator.get_base(), KA_OFF, T.i32, shape=(1,)).get()
         mrg = SmemPtr(allocator.get_base(), LDS_MERGE, T.f32,
                       shape=(MERGE_F32_PER_WAVE * 4,)).get()
 
@@ -199,35 +215,44 @@ def build_flash_attn_fp8_wsplit_module(
                     g16(v_ptr, kvi(r0, loff)), g16(v_ptr, kvi(r1, loff)))
 
         def sk(kb, k0, k1):
-            Vec(k0).store(lds, [fx.Index(kb) + lrow * fx.Index(K_STRIDE) + loff])
-            Vec(k1).store(lds, [fx.Index(kb) + (lrow + fx.Index(16)) * fx.Index(K_STRIDE) + loff])
+            Vec(k0).store(lds, [kb + lrow * fx.Index(K_STRIDE) + loff])
+            Vec(k1).store(lds, [kb + (lrow + fx.Index(16)) * fx.Index(K_STRIDE) + loff])
 
         def sv(vb, v0, v1):
             for j in range_constexpr(VEC):
                 d0 = loff + fx.Index(j)
                 Vec.from_elements([Vec(v0)[j]], fx.Int8).store(
-                    lds, [fx.Index(vb) + d0 * fx.Index(V_STRIDE) + lrow])
+                    lds, [vb + d0 * fx.Index(V_STRIDE) + lrow])
                 Vec.from_elements([Vec(v1)[j]], fx.Int8).store(
-                    lds, [fx.Index(vb) + d0 * fx.Index(V_STRIDE) + lrow + fx.Index(16)])
+                    lds, [vb + d0 * fx.Index(V_STRIDE) + lrow + fx.Index(16)])
 
         def cnt_ptr(ci):
             return create_llvm_ptr(
-                extract_base_index(cnt_mr, address_space=3) + fx.Index(ci * 4), 3)
+                extract_base_index(cnt_mr, address_space=3) + ci * fx.Index(4), 3)
 
         def soft_wait(ci, tgt):
-            cur = fx.Int32(_memref.load(cnt_mr, [_raw(fx.Index(ci))]))
+            # Monotonic 原子读自旋：原子读不可被 LICM 提升出循环（普通读会变死
+            # 循环），Monotonic 不触发 acquire 半边的 global_inv 降级（SeqCst/
+            # Acquire fence+原子在自旋路径里发射 s_wait_loadcnt+global_inv 风暴，
+            # 与在飞全局加载互锁死锁——2026-10-24 ISA 实锤）
+            cur = fx.Int32(fllv.atomic_add(cnt_ptr(ci), fx.Int32(0),
+                                           ordering=AtomicOrdering.Monotonic,
+                                           syncscope="workgroup"))
             while arith.cmpi(arith.CmpIPredicate.slt, _raw(cur), _raw(tgt)):
-                cur = fx.Int32(_memref.load(cnt_mr, [_raw(fx.Index(ci))]))
-            fllv.memory_fence(syncscope="workgroup", ordering=AtomicOrdering.SeqCst)
+                cur = fx.Int32(fllv.atomic_add(cnt_ptr(ci), fx.Int32(0),
+                                               ordering=AtomicOrdering.Monotonic,
+                                               syncscope="workgroup"))
+            # keepalive：无副作用的 while 会被改写器当死代码静默删除（2026-10-24
+            # MLIR 实锤），把观测到的计数值存 LDS 保活自旋链
+            _memref.store(_raw(cur), ka_mr, [_raw(fx.Index(0))])
 
         def soft_arrive(ci):
-            # 全 lane 到达（去掉嵌在 while-in-if 里的 lane==0 分支——三层
-            # 控制流嵌套下的 side-effect 分支可疑；128 个原子代价可接受）
-            fllv.atomic_add(cnt_ptr(ci), fx.Int32(1),
-                            ordering=AtomicOrdering.AcqRel, syncscope="workgroup")
+            # leader（lane0）Release 到达：序住前面的 LDS store，无 acquire 半边
+            if lane == fx.Index(0):
+                fllv.atomic_add(cnt_ptr(ci), fx.Int32(1),
+                                ordering=AtomicOrdering.Release, syncscope="workgroup")
 
         def soft_bar(ci, tgt):
-            fllv.memory_fence(syncscope="workgroup", ordering=AtomicOrdering.SeqCst)
             soft_arrive(ci)
             soft_wait(ci, tgt)
 
@@ -238,108 +263,108 @@ def build_flash_attn_fp8_wsplit_module(
         def reduction_peer(v):
             return fx.Float32(v).shuffle_xor(fx.Int32(16), fx.Int32(WARP))
 
-        def _group_loop(g):
-            kb = LDS_G0 if g == 0 else LDS_G1
-            vb = kb + K_TILE
-            ci_data = g
-            ci_done = 2 + g
-            total = (fx.Int32(seq_len) + fx.Int32(31)) // fx.Int32(32)
-            myn = (total - fx.Int32(g) + fx.Int32(1)) // fx.Int32(2)
+        # 单路径组循环：组参数运行时算术（grp_i），外层 for + 携带。
+        # 不用 if/else 包 while：改写器会静默丢弃 while 嵌 while 的内层自旋
+        # （2026-10-24 MLIR 实锤：wsplit 旧版 4 个自旋全丢 → 纯竞态 NaN）。
+        kb = fx.Index(LDS_G0) + grp_i * fx.Index(K_TILE + V_TILE)
+        vb = kb + fx.Index(K_TILE)
+        ci_data = grp_i
+        ci_done = fx.Index(2) + grp_i
+        g32 = fx.Int32(grp_i)
+        total32 = (fx.Int32(seq_len) + fx.Int32(31)) // fx.Int32(32)
+        myn = (total32 - g32 + fx.Int32(1)) // fx.Int32(2)
 
-            m = c_ninf
-            l = c_0f
-            o0_ = _raw(c_z8f); o1_ = o0_; o2_ = o0_; o3_ = o0_
-            o4_ = o0_; o5_ = o0_; o6_ = o0_; o7_ = o0_
-            it = fx.Int32(0)
-            while arith.cmpi(arith.CmpIPredicate.slt, _raw(it), _raw(myn)):
-                tile = fx.Index(fx.Int32(g * 32) + fx.Int32(64) * it)
-                k0, k1, v0, v1 = gload_kv(tile)
-                soft_wait(ci_done, fx.Int32(WPG * WARP) * it)
-                sk(kb, k0, k1)
-                sv(vb, v0, v1)
-                soft_bar(ci_data, fx.Int32(WPG * WARP) * (it + fx.Int32(1)))
+        _loop_init = [_raw(c_ninf), _raw(c_0f)] + [_raw(c_z8f) for _ in range(8)]
+        loop_results = _loop_init
+        for it_i, iargs in range(0, fx.Index(myn), 1, init=_loop_init):
+            m = fx.Float32(iargs[0])
+            l = fx.Float32(iargs[1])
+            o0_ = iargs[2]; o1_ = iargs[3]; o2_ = iargs[4]; o3_ = iargs[5]
+            o4_ = iargs[6]; o5_ = iargs[7]; o6_ = iargs[8]; o7_ = iargs[9]
+            it = fx.Int32(it_i)
+            tile = grp_i * fx.Index(32) + it_i * fx.Index(64)
+            k0, k1, v0, v1 = gload_kv(tile)
+            soft_wait(ci_done, fx.Int32(WPG) * it)
+            sk(kb, k0, k1)
+            sv(vb, v0, v1)
+            soft_bar(ci_data, fx.Int32(WPG) * (it + fx.Int32(1)))
 
-                # ---- GEMM1 ----
-                accs = [_raw(c_z8f), _raw(c_z8f)]
-                for ks in range_constexpr(8):
-                    kcol = fx.Index(ks * 16) + klane * fx.Index(8)
-                    for half in range_constexpr(2):
-                        kr = lane16 + fx.Index(half * 16)
-                        kp = Vec.load(v8i8_t, lds,
-                                      [fx.Index(kb) + kr * fx.Index(K_STRIDE) + kcol])
-                        accs[half] = wmma_fp8(to_v2i32(kp), to_v2i32(q_packs[ks]), accs[half])
-                s_raw = []
+            # ---- GEMM1 ----
+            accs = [_raw(c_z8f), _raw(c_z8f)]
+            for ks in range_constexpr(8):
+                kcol = fx.Index(ks * 16) + klane * fx.Index(8)
                 for half in range_constexpr(2):
-                    for r in range_constexpr(8):
-                        s_raw.append(Vec(accs[half])[r])
+                    kr = lane16 + fx.Index(half * 16)
+                    kp = Vec.load(v8i8_t, lds,
+                                  [kb + kr * fx.Index(K_STRIDE) + kcol])
+                    accs[half] = wmma_fp8(to_v2i32(kp), to_v2i32(q_packs[ks]), accs[half])
+            s_raw = []
+            for half in range_constexpr(2):
+                for r in range_constexpr(8):
+                    s_raw.append(Vec(accs[half])[r])
 
-                # ---- softmax 标量链 ----
-                lmax = s_raw[0]
-                for r in range_constexpr(15):
-                    lmax = _fmax(lmax, s_raw[r + 1])
-                rmax = _fmax(lmax, reduction_peer(lmax))
-                m_new = _fmax(m, rmax)
-                corr = rocdl.exp2(ir.F32Type.get(),
-                                  _raw(_fmul(_fsub(m, m_new), qk_scale_log2e)))
-                l_corr = _fmul(corr, l)
-                corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(8).ir_value()
-                o0_ = _fmul(o0_, corr_vec); o1_ = _fmul(o1_, corr_vec)
-                o2_ = _fmul(o2_, corr_vec); o3_ = _fmul(o3_, corr_vec)
-                o4_ = _fmul(o4_, corr_vec); o5_ = _fmul(o5_, corr_vec)
-                o6_ = _fmul(o6_, corr_vec); o7_ = _fmul(o7_, corr_vec)
+            # ---- softmax 标量链 ----
+            lmax = s_raw[0]
+            for r in range_constexpr(15):
+                lmax = _fmax(lmax, s_raw[r + 1])
+            rmax = _fmax(lmax, reduction_peer(lmax))
+            m_new = _fmax(m, rmax)
+            corr = rocdl.exp2(ir.F32Type.get(),
+                              _raw(_fmul(_fsub(m, m_new), qk_scale_log2e)))
+            l_corr = _fmul(corr, l)
+            corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(8).ir_value()
+            o0_ = _fmul(o0_, corr_vec); o1_ = _fmul(o1_, corr_vec)
+            o2_ = _fmul(o2_, corr_vec); o3_ = _fmul(o3_, corr_vec)
+            o4_ = _fmul(o4_, corr_vec); o5_ = _fmul(o5_, corr_vec)
+            o6_ = _fmul(o6_, corr_vec); o7_ = _fmul(o7_, corr_vec)
 
-                # ---- exp2 + pack ----
-                neg_sm = _fsub(c_0f, _fmul(qk_scale_log2e, m_new))
-                p_vals = []
-                lsum = c_0f
-                for r in range_constexpr(16):
-                    diff = fmath.fma(_raw(s_raw[r]), _raw(qk_scale_log2e), neg_sm)
-                    p = rocdl.exp2(ir.F32Type.get(), _raw(diff))
-                    p_vals.append(p)
-                    lsum = _fadd(lsum, p)
-                p_packs = []
-                for pks in range_constexpr(2):
-                    p_packs.append(pack_fp8(
-                        [_fmul(p_vals[pks * 8 + j], c_448) for j in range(8)]))
-                peer_sum = reduction_peer(lsum)
-                tile_sum = _fadd(lsum, peer_sum)
-                l = _fadd(l_corr, _fmul(tile_sum, c_448))
-                m = m_new
+            # ---- exp2 + pack ----
+            neg_sm = _fsub(c_0f, _fmul(qk_scale_log2e, m_new))
+            p_vals = []
+            lsum = c_0f
+            for r in range_constexpr(16):
+                diff = fmath.fma(_raw(s_raw[r]), _raw(qk_scale_log2e), neg_sm)
+                p = rocdl.exp2(ir.F32Type.get(), _raw(diff))
+                p_vals.append(p)
+                lsum = _fadd(lsum, p)
+            p_packs = []
+            for pks in range_constexpr(2):
+                p_packs.append(pack_fp8(
+                    [_fmul(p_vals[pks * 8 + j], c_448) for j in range(8)]))
+            peer_sum = reduction_peer(lsum)
+            tile_sum = _fadd(lsum, peer_sum)
+            l = _fadd(l_corr, _fmul(tile_sum, c_448))
+            m = m_new
 
-                # ---- GEMM2（V^T LDS，A 操作数预取流水）----
-                def ld_v(pks_v, dc_v):
-                    dpos = fx.Index(dc_v * 16) + lane16
-                    k0i = fx.Index(pks_v * 16) + klane * fx.Index(8)
-                    return Vec.load(v8i8_t, lds,
-                                    [fx.Index(vb) + dpos * fx.Index(V_STRIDE) + k0i])
-                cur_v = ld_v(0, 0)
-                for pks in range_constexpr(2):
-                    for dc in range_constexpr(8):
-                        has_next = const_expr(not (pks == 1 and dc == 7))
-                        if const_expr(has_next):
-                            ndc = dc + 1
-                            npks = pks
-                            if const_expr(ndc >= 8):
-                                ndc = 0
-                                npks = pks + 1
-                            cur_v_n = ld_v(npks, ndc)
-                        accs_l = [o0_, o1_, o2_, o3_, o4_, o5_, o6_, o7_]
-                        accs_l[dc] = wmma_fp8(to_v2i32(cur_v), to_v2i32(p_packs[pks]), accs_l[dc])
-                        o0_, o1_, o2_, o3_ = accs_l[0], accs_l[1], accs_l[2], accs_l[3]
-                        o4_, o5_, o6_, o7_ = accs_l[4], accs_l[5], accs_l[6], accs_l[7]
-                        if const_expr(has_next):
-                            cur_v = cur_v_n
-                soft_arrive(ci_done)
-                it = it + fx.Int32(1)
-            return m, l, [o0_, o1_, o2_, o3_, o4_, o5_, o6_, o7_]
-
-        m_run = c_ninf
-        l_run = c_0f
-        o_run = [_raw(c_z8f) for _ in range(8)]
-        if is_g0:
-            m_run, l_run, o_run = _group_loop(0)
-        else:
-            m_run, l_run, o_run = _group_loop(1)
+            # ---- GEMM2（V^T LDS，A 操作数预取流水）----
+            def ld_v(pks_v, dc_v):
+                dpos = fx.Index(dc_v * 16) + lane16
+                k0i = fx.Index(pks_v * 16) + klane * fx.Index(8)
+                return Vec.load(v8i8_t, lds,
+                                [vb + dpos * fx.Index(V_STRIDE) + k0i])
+            cur_v = ld_v(0, 0)
+            for pks in range_constexpr(2):
+                for dc in range_constexpr(8):
+                    has_next = const_expr(not (pks == 1 and dc == 7))
+                    if const_expr(has_next):
+                        ndc = dc + 1
+                        npks = pks
+                        if const_expr(ndc >= 8):
+                            ndc = 0
+                            npks = pks + 1
+                        cur_v_n = ld_v(npks, ndc)
+                    accs_l = [o0_, o1_, o2_, o3_, o4_, o5_, o6_, o7_]
+                    accs_l[dc] = wmma_fp8(to_v2i32(cur_v), to_v2i32(p_packs[pks]), accs_l[dc])
+                    o0_, o1_, o2_, o3_ = accs_l[0], accs_l[1], accs_l[2], accs_l[3]
+                    o4_, o5_, o6_, o7_ = accs_l[4], accs_l[5], accs_l[6], accs_l[7]
+                    if const_expr(has_next):
+                        cur_v = cur_v_n
+            soft_arrive(ci_done)
+            loop_results = yield [_raw(m), _raw(l),
+                                  o0_, o1_, o2_, o3_, o4_, o5_, o6_, o7_]
+        m_run = fx.Float32(loop_results[0])
+        l_run = fx.Float32(loop_results[1])
+        o_run = loop_results[2:10]
 
         gpu.barrier()
 

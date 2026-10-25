@@ -41,6 +41,7 @@ def build():
         base = allocator.get_base()
         cnt_mr = SmemPtr(base, off, TT.i32, shape=(GROUPS,)).get()
         data_mr = SmemPtr(base, off + 8, TT.i32, shape=(256,)).get()
+        ka_mr = SmemPtr(base, off + 8 + 1024, TT.i32, shape=(1,)).get()
 
         tid = fx.Index(gpu.thread_idx.x)
         lane = tid % fx.Index(LANES)
@@ -74,6 +75,7 @@ def build():
             cur = fx.Int32(_memref.load(cnt_mr, [_raw(grp_i)]))
             while arith.cmpi(arith.CmpIPredicate.slt, _raw(fx.Int32(cur)), _raw(tgt)):
                 cur = fx.Int32(_memref.load(cnt_mr, [_raw(grp_i)]))
+            _memref.store(_raw(fx.Int32(cur)), ka_mr, [_raw(fx.Index(0))])
             pep = create_llvm_ptr(extract_base_index(data_mr, address_space=3) + peer_slot * fx.Index(4), 3)
             got = fx.Int32(fllv.atomic_add(pep, fx.Int32(0), ordering=AtomicOrdering.Acquire, syncscope="workgroup"))
             bad = fx.Int32(ArithValue(arith.cmpi(arith.CmpIPredicate.ne, _raw(got), _raw(rnd))
