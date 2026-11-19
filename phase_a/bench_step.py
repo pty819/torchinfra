@@ -22,7 +22,7 @@ times = []
 def cb(i, n):
     torch.cuda.synchronize(); times.append(time.time())
 t0 = time.time()
-x = sample(model, ctx, None, (16, Hl, Wl), sig, cfg=1.0, seed=7, device=dev)
+x = sample(model, ctx, None, (16, Hl, Wl), sig, cfg=float(sys.argv[3]) if len(sys.argv)>3 else 1.0, seed=7, device=dev, callback=cb)
 torch.cuda.synchronize()
 total = time.time() - t0
 per = [times[i] - (times[i-1] if i else t0) for i in range(len(times))]
