@@ -62,21 +62,21 @@ class FP8OrBF16Linear(nn.Module):
         return self.w_bf16
 
     def forward(self, x):
-        if self.mode == "bf16" or not x.is_cuda:
-            return F.linear(x, self.w.to(x.dtype))
-        # fp8: 动态 per-tensor 激活量化; 权重 per-row
-        xa = x.abs().amax().clamp(min=1e-6)
+        if self.mode == "bf16" or not x.is_cuda or x.shape[-2] < 16:
+            # 小 M（如 modulation 的 M=2）不满足 _scaled_mm tile 要求; 临时反量化, 不缓存
+            w = (self.qdata.float() * self.scale).to(torch.bfloat16)
+            return F.linear(x, w.to(x.dtype))
+        xa = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-6)  # [M,1] 逐 token
         xs = (xa / 448.0).float()
         xq = (x.float() / xs).clamp(-448, 448).to(torch.float8_e4m3fn)
-        # _scaled_mm 需要 [m,k]x[k,n]; rowwise: scale_a [m,1], scale_b [1,n]
+        # RowWise: scale_a (M,1) × scale_b (1,N), 均需 contiguous
         try:
             y = torch._scaled_mm(xq.reshape(-1, xq.shape[-1]), self.qdata.t(),
-                                 scale_a=xs.reshape(1, 1), scale_b=self.scale.t(),
+                                 scale_a=xs.reshape(-1, 1), scale_b=self.scale.t().contiguous(),
                                  bias=self.bias, out_dtype=torch.bfloat16)
             return y.reshape(*x.shape[:-1], -1)
-        except Exception:
-            # rowwise 不支持时退化 bf16（保正确性; 速度路径由 Task 4 单测裁决）
-            return F.linear(x, self.w.to(x.dtype))
+        except Exception as e:
+            raise RuntimeError(f"_scaled_mm 失败 (qdata{tuple(self.qdata.shape)} x{x.shape} xs{xs.shape} sb{self.scale.t().shape}): {e}")
 
 
 class Block(nn.Module):
@@ -154,7 +154,7 @@ class QwenDiT(nn.Module):
         if pe is None:  # 采样器未传则按形状缓存构建
             pe = self._pe(ctx.shape[1], x_latent.shape[2] // 2, x_latent.shape[3] // 2, x_latent.device)
         t = torch.stack([timestep, torch.zeros_like(timestep)], 1)          # [B,2]
-        h = timestep_embedding(t.reshape(-1))                               # [2B,256]
+        h = timestep_embedding(t.reshape(-1)).to(self.t_embed_1.weight.dtype)  # [2B,256]
         h = F.silu(self.t_embed_1(h))
         h = F.silu(self.t_embed_2(h))                                       # embedder 内 silu + 外部 silu
         mod_t = self.modulation(h).view(B, 2, 4, HIDDEN)                    # [B,列,4槽,4096]
