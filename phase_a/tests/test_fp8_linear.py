@@ -13,6 +13,7 @@ def test_rowwise_scaled_mm_supported_and_close():
     if not torch.cuda.is_available():
         import pytest; pytest.skip("no cuda")
     lin, w_bf16 = _mk("fp8")
+    assert lin.fp8_ok, "fp8 探测失败-测试走的是退化路径!"
     x = (torch.randn(128, 4096, device="cuda") * 0.02).to(torch.bfloat16)
     y_fp8 = lin(x)
     y_ref = torch.nn.functional.linear(x, w_bf16)

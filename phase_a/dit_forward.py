@@ -54,6 +54,19 @@ class FP8OrBF16Linear(nn.Module):
             self.register_buffer("bias", bias)
         else:
             self.bias = None
+        # 一次性能力探测（避免 forward 内 try/except 造成 dynamo 图断裂）
+        self.fp8_ok = False
+        if self.mode == "fp8" and self.qdata.is_cuda:
+            try:
+                n = min(32, self.qdata.shape[0], self.qdata.shape[1])
+                p = torch.zeros(n, n, device=self.qdata.device).to(torch.float8_e4m3fn)
+                torch._scaled_mm(p, self.qdata[:n, :n].t(),
+                                 scale_a=torch.ones(n, 1, device=p.device),
+                                 scale_b=torch.ones(1, n, device=p.device),
+                                 out_dtype=torch.bfloat16)
+                self.fp8_ok = True
+            except Exception:
+                self.fp8_ok = False
 
     @property
     def w(self):  # [out, in] bf16
@@ -62,21 +75,18 @@ class FP8OrBF16Linear(nn.Module):
         return self.w_bf16
 
     def forward(self, x):
-        if self.mode == "bf16" or not x.is_cuda or x.shape[-2] < 16:
+        if not self.fp8_ok or not x.is_cuda or x.shape[-2] < 16:
             # 小 M（如 modulation 的 M=2）不满足 _scaled_mm tile 要求; 临时反量化, 不缓存
             w = (self.qdata.float() * self.scale).to(torch.bfloat16)
             return F.linear(x, w.to(x.dtype))
         xa = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-6)  # [M,1] 逐 token
         xs = (xa / 448.0).float()
         xq = (x.float() / xs).clamp(-448, 448).to(torch.float8_e4m3fn)
-        # RowWise: scale_a (M,1) × scale_b (1,N), 均需 contiguous
-        try:
-            y = torch._scaled_mm(xq.reshape(-1, xq.shape[-1]), self.qdata.t(),
-                                 scale_a=xs.reshape(-1, 1), scale_b=self.scale.t().contiguous(),
-                                 bias=self.bias, out_dtype=torch.bfloat16)
-            return y.reshape(*x.shape[:-1], -1)
-        except Exception as e:
-            raise RuntimeError(f"_scaled_mm 失败 (qdata{tuple(self.qdata.shape)} x{x.shape} xs{xs.shape} sb{self.scale.t().shape}): {e}")
+        # RowWise: scale_a (M,1) × scale_b (1,N)
+        y = torch._scaled_mm(xq.reshape(-1, xq.shape[-1]), self.qdata.t(),
+                             scale_a=xs.reshape(-1, 1), scale_b=self.scale.t().contiguous(),
+                             bias=self.bias, out_dtype=torch.bfloat16)
+        return y.reshape(*x.shape[:-1], -1)
 
 
 class Block(nn.Module):
@@ -160,7 +170,7 @@ class QwenDiT(nn.Module):
         mod_t = self.modulation(h).view(B, 2, 4, HIDDEN)                    # [B,列,4槽,4096]
         mod = [mod_t[:, :, i] for i in range(4)]                            # 每个 [B,2,4096]
 
-        text = self.txt_out_layer(F.gelu(self.txt_in_layer(self.txt_norm(ctx))))
+        text = self.txt_out_layer(F.gelu(self.txt_in_layer(self.txt_norm(ctx)), approximate="tanh"))
         img = self.img_in(self._patchify(x_latent))                         # [B,Si,4096]
         joint = torch.cat([text, img], 1)
         for blk in self.blocks:
@@ -186,28 +196,23 @@ class QwenDiT(nn.Module):
 
 # ---------------- rope (diffusers QwenEmbedRope 移植, axes [16,56,56]) ----------------
 
-def _band(index, dim, theta=THETA):
-    return torch.outer(index, 1.0 / theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+def _angles(pos, dim, theta=THETA):
+    inv = 1.0 / theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+    return torch.outer(pos.float(), inv)  # [S, d/2]
 
 
-def build_rope(txt_len, h_tokens, w_tokens, device="cpu"):
-    """返回 pe=(cos,sin) [St+Si, HEAD_DIM//2]（文本段用 t 带行, 图像段用 h/w 网格）。
-    文本起始行 = max(h,w)（diffusers 原样, scale_rope=False）。"""
-    idx = torch.arange(4096)
-    bands = [_band(idx, d) for d in AXES_DIM]                       # 每个 [4096, d/2]
-    ang = torch.cat(bands, 1)                                        # [4096, 64]
-    max_vid = max(h_tokens, w_tokens)
-    txt = ang[max_vid: max_vid + txt_len]                            # [St, 64]
-    # 图像: t 带恒 0 行, h 带按行, w 带按列
-    zero_row = ang[:1, : AXES_DIM[0] // 2]
-    hh = bands[1][:h_tokens]                                         # [h, 28]
-    ww = bands[2][:w_tokens]                                         # [w, 28]
-    hh = hh[:, None, :].expand(h_tokens, w_tokens, -1)
-    ww = ww[None, :, :].expand(h_tokens, w_tokens, -1)
-    tt = zero_row.expand(h_tokens, w_tokens, -1)
-    img = torch.cat([tt, hh, ww], -1).reshape(h_tokens * w_tokens, -1)
-    full = torch.cat([txt, img], 0).to(device)
-    return full.cos(), full.sin()
+def build_rope(txt_len, h_tok, w_tok, device="cpu"):
+    """sdcpp QwenImage21Layout.build 移植 (axes [16,56,56]):
+    text j -> (j,j,j) 从 0 起; image (h,w) -> (L_txt, h-(H-H//2), w-(W-W//2)) 中心化"""
+    t_txt = torch.arange(txt_len, dtype=torch.float32)
+    hh, ww = torch.meshgrid(torch.arange(h_tok), torch.arange(w_tok), indexing="ij")
+    t_pos = torch.cat([t_txt, torch.full((h_tok * w_tok,), float(txt_len))])
+    h_pos = torch.cat([t_txt, hh.flatten().float() - (h_tok - h_tok // 2)])
+    w_pos = torch.cat([t_txt, ww.flatten().float() - (w_tok - w_tok // 2)])
+    ang = torch.cat([_angles(t_pos, AXES_DIM[0]),
+                     _angles(h_pos, AXES_DIM[1]),
+                     _angles(w_pos, AXES_DIM[2])], dim=1)
+    return ang.cos().to(device), ang.sin().to(device)
 
 
 def apply_rope(x, pe):
