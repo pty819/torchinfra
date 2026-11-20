@@ -16,6 +16,40 @@ D = f"{HOME}/models/qwen21"
 CLI = f"{HOME}/build/qwen21/stable-diffusion.cpp/build-hip/bin/sd-cli"
 MMPROJ = f"{D}/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
 OUTDIR = f"{HOME}/Pictures/qwen"
+
+# ---- qdit 自研引擎 (常驻 worker, 127.0.0.1:7861) ----
+QDIT_URL = "http://127.0.0.1:7861"
+import json as _json, urllib.request as _ur
+def _qdit_post(path, payload=None, timeout=15):
+    req = _ur.Request(QDIT_URL + path, data=_json.dumps(payload or {}).encode(),
+                      headers={"Content-Type": "application/json"})
+    with _ur.urlopen(req, timeout=timeout) as r:
+        return _json.loads(r.read())
+def _qdit_get(path, timeout=15):
+    with _ur.urlopen(QDIT_URL + path, timeout=timeout) as r:
+        return _json.loads(r.read())
+def qdit_state():
+    try:
+        return _qdit_get("/state", timeout=5)
+    except Exception:
+        return {"down": True, "loaded": False}
+def _qdit_poll(jid, progress=None, a=0.0, b=1.0):
+    import time as _t
+    while True:
+        _t.sleep(2)
+        try:
+            j = _qdit_get(f"/job/{jid}", timeout=20)
+        except Exception:
+            continue
+        if j.get("status") == "error":
+            raise gr.Error("qdit 失败: " + str(j.get("error", ""))[:300])
+        if j.get("status") == "done":
+            return j
+        if progress and j.get("total"):
+            progress(a + (b - a) * min(1, j.get("step", 0) / j["total"]),
+                     desc=f"qdit 采样 {j.get('step', 0)}/{j['total']} 步")
+        elif progress:
+            progress(a, desc="qdit 加载+编译预热中…（首次 1-3 分钟）")
 os.makedirs(OUTDIR, exist_ok=True)
 
 # 档位 -> (steps, sigmas, cfg, 蒸馏LoRA文件名或None, 采样器)
@@ -75,11 +109,43 @@ def preset_text(preset):
     return f"{steps}步/{sampler}/CFG {cfg}" + (f" + {distill}" if distill else "")
 
 
-def generate(prompt, negative, refs, preset, width, height, seed, follow, *nsfw_args,
+def generate_qdit(prompt, negative, refs, preset, width, height, seed, progress=gr.Progress()):
+    if refs:
+        raise gr.Error("qdit 引擎暂不支持参考图编辑, 请切回 sdcpp")
+    steps, _sig, cfg, _distill, sampler = PRESETS.get(preset, PRESETS[DEFAULT_PRESET_T2I])
+    st = qdit_state()
+    if st.get("down"):
+        raise gr.Error("qdit worker 未运行 (82: cd ~/项目/qwen21dit/phase_a && ~/rocm10/bin/python serve.py)")
+    if not st["loaded"]:
+        progress(0.02, desc="qdit 首次加载+预热…")
+        j = _qdit_post("/load", {"warmup_prompts": [prompt.strip()]})["job"]
+        _qdit_poll(j, progress, 0.02, 0.15)
+    w = _snap32(width or 1344); h = _snap32(height or 1344)
+    if w != h:
+        raise gr.Error("qdit 引擎当前只支持方形输出 (宽=高)")
+    if seed is None or seed < 0:
+        seed = random.randint(0, 2**31 - 1)
+    t0 = time.time()
+    j = _qdit_post("/generate", {"prompt": prompt.strip(), "neg": (negative or " ").strip() or " ",
+                                 "seed": int(seed), "steps": int(steps), "cfg": cfg,
+                                 "size": int(w), "sampler": "er_sde" if "er_sde" in str(sampler) else "euler"})["job"]
+    job = _qdit_poll(j, progress, 0.15, 0.95)
+    out = job.get("image")
+    dt = time.time() - t0
+    info = (f"**qdit 自研引擎** · {w}×{h} · seed `{seed}` · 编码 {job.get('enc_s')}s · "
+            f"采样 {job.get('sample_s')}s · VAE {job.get('vae_s')}s · ⏱ 全程 {dt:.0f}s\n\n"
+            f"已存: `{out}`\n\n⚠️ qdit 暂不支持 LoRA（无 NSFW/加速效果）")
+    progress(1.0, desc="完成")
+    return out, info, seed
+
+
+def generate(engine, prompt, negative, refs, preset, width, height, seed, follow, *nsfw_args,
              progress=gr.Progress()):
     t0 = time.time()
     if not prompt or not prompt.strip():
         raise gr.Error("提示词不能为空")
+    if str(engine).startswith("qdit"):
+        return generate_qdit(prompt, negative, refs, preset, width, height, seed, progress)
     refs = [r for r in (refs or []) if r]
     if refs and not os.path.exists(MMPROJ):
         raise gr.Error(f"编辑模式缺 mmproj 文件: {MMPROJ}")
@@ -110,6 +176,12 @@ def generate(prompt, negative, refs, preset, width, height, seed, follow, *nsfw_
     out = f"/tmp/qwen_web_{stamp}_s{seed}.png"
     mode = "编辑" if refs else "文生图"
 
+    st = qdit_state()      # 显存互斥: sdcpp 跑之前卸掉常驻的 qdit
+    if st.get("loaded"):
+        try:
+            _qdit_post("/unload")
+        except Exception:
+            pass
     cmd = [CLI,
            "--diffusion-model", f"{D}/omni-int8-convrot-comfy.safetensors",
            "--vae", f"{D}/qwen_image_2.1_vae_bf16.safetensors",
@@ -204,6 +276,10 @@ with gr.Blocks(title="Qwen Draw · 82") as demo:
                             "再补场景与光线\n\n"
                             "4️⃣ 档位选 ⚡Viggle 或 🎯姿势精修。提示词写完整句子（主体→场景→光线方向→机位→材质），"
                             "CFG 1 档下负向词无效，限制写进正向。")
+            engine = gr.Radio(["sdcpp", "qdit(自研·常驻)"], value="sdcpp", label="推理引擎")
+            with gr.Accordion("🚀 qdit 引擎管理（预热后生成零等待）", open=False):
+                warm_btn = gr.Button("🔥 预热/驻留（用当前提示词编译缓存）")
+                qdit_status = gr.Markdown()
             btn = gr.Button("生成", variant="primary")
         with gr.Column(scale=4):
             image = gr.Image(label="结果", type="filepath", height=520)
@@ -235,11 +311,29 @@ with gr.Blocks(title="Qwen Draw · 82") as demo:
             return fn
         nsfw_widgets[i].change(_mk(), [nsfw_widgets[i]], preset)
 
+    def qdit_refresh_status():
+        st = qdit_state()
+        if st.get("down"):
+            return "⚪ qdit worker 未运行"
+        if not st.get("loaded"):
+            return "⚪ 已连接 · 未驻留（生成时自动加载, 或点预热）"
+        return f"🟢 已驻留 · 热长度 {st.get('warm_lens')} · VRAM {st.get('vram_alloc_gb')}G"
+
+    def qdit_warm(p):
+        st = qdit_state()
+        if st.get("down"):
+            raise gr.Error("qdit worker 未运行")
+        j = _qdit_post("/load", {"warmup_prompts": [p.strip() or " "]})["job"]
+        _qdit_poll(j)
+        return qdit_refresh_status()
+
+    warm_btn.click(qdit_warm, [prompt], qdit_status)
     btn.click(generate,
-              inputs=[prompt, negative, refs, preset, width, height, seed, follow] + nsfw_widgets,
+              inputs=[engine, prompt, negative, refs, preset, width, height, seed, follow] + nsfw_widgets,
               outputs=[image, info, seed])
     refresh.click(refresh_gallery, None, gallery)
     demo.load(refresh_gallery, None, gallery)
+    demo.load(qdit_refresh_status, None, qdit_status)
 
 ip = _ts_ip()
 demo.queue(default_concurrency_limit=1, max_size=8).launch(
