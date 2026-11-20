@@ -60,7 +60,7 @@ def load_fp8(path=CKPT, device="cuda", mode="fp8", num_layers=N_LAYERS):
         # 风评最佳 NSFW 固定套装 (qdit 模式唯一配置, 不暴露开关)
         from lora import apply_lora
         LORA_DIR = "~/models/qwen21/loras"
-        for fname, s_ in (("nsfw_alpacas_v2", 0.8), ("nsfw_vaginus_v13b", 0.9), ("nsfw_genitalia_fix", 0.6)):
+        for fname, s_ in (("nsfw_alpacas_v2", 1.0), ("nsfw_vaginus_v13b", 1.0), ("nsfw_genitalia_fix", 1.0)):
             n = apply_lora(model, f"{LORA_DIR}/{fname}.safetensors", s_, device=device)
             print(f"[lora] {fname}@{s_}: {n} 目标已挂")
     return model.eval()
