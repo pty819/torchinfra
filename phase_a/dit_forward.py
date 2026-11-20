@@ -11,6 +11,7 @@
 - 终层: scale = norm_out.linear(时间步列); 出 LN 后乘 (scale+1), proj_out → 64ch
 """
 import math
+import os as _os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,6 +28,8 @@ def timestep_embedding(t, dim=256):
     args = t.float()[:, None] * freqs[None, :]
     return torch.cat([args.cos(), args.sin()], dim=-1)
 
+
+_FP8_ATTN = _os.environ.get("QDIT_FP8_ATTN", "0") == "1"
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6, zero_center=False):
@@ -122,7 +125,11 @@ class Block(nn.Module):
         k = self.attn_norm_k(self.attn_to_k(h).view(B, S, 32, HEAD_DIM))
         v = self.attn_to_v(h).view(B, S, 32, HEAD_DIM)
         q, k = apply_rope(q, pe), apply_rope(k, pe)
-        o = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
+        if _FP8_ATTN:
+            from fp8_attn import attention_fp8
+            o = attention_fp8(q, k, v)                      # [B,S,H*D] bf16
+        else:
+            o = o.reshape(B, S, HIDDEN)
         o = self.attn_to_out(o.reshape(B, S, HIDDEN))
         x = x + scale_rows(o, m1i, m1t)
 
