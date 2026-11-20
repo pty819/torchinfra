@@ -134,7 +134,7 @@ def generate_qdit(prompt, negative, refs, preset, width, height, seed, progress=
     dt = time.time() - t0
     info = (f"**qdit 自研引擎** · {w}×{h} · seed `{seed}` · 编码 {job.get('enc_s')}s · "
             f"采样 {job.get('sample_s')}s · VAE {job.get('vae_s')}s · ⏱ 全程 {dt:.0f}s\n\n"
-            f"已存: `{out}`\n\n⚠️ qdit 暂不支持 LoRA（无 NSFW/加速效果）")
+            f"已存: `{out}`\n\n🔥 内置固定 LoRA 套装: Alpacas v2@0.8 · Vaginus@0.9 · Genitalia修复@0.6（无需勾选）")
     progress(1.0, desc="完成")
     return out, info, seed
 

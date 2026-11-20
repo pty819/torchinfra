@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """unsloth fp8 checkpoint → QwenDiT 加载器（meta 骨架零内存装配, 避免 OOM）"""
+import os
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file
@@ -55,6 +56,13 @@ def load_fp8(path=CKPT, device="cuda", mode="fp8", num_layers=N_LAYERS):
             setattr(blk, attr, FP8OrBF16Linear(q, s, mode=mode))
 
     del sd
+    if os.environ.get("QDIT_LORA", "1") == "1":
+        # 风评最佳 NSFW 固定套装 (qdit 模式唯一配置, 不暴露开关)
+        from lora import apply_lora
+        LORA_DIR = "~/models/qwen21/loras"
+        for fname, s_ in (("nsfw_alpacas_v2", 0.8), ("nsfw_vaginus_v13b", 0.9), ("nsfw_genitalia_fix", 0.6)):
+            n = apply_lora(model, f"{LORA_DIR}/{fname}.safetensors", s_, device=device)
+            print(f"[lora] {fname}@{s_}: {n} 目标已挂")
     return model.eval()
 
 

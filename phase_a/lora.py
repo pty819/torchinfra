@@ -53,14 +53,15 @@ def apply_lora(model, path, strength=1.0, device="cpu", dtype=torch.bfloat16):
         if m:
             pairs.setdefault(m.group(1), {})[m.group(2)] = v
     for mod, ab in pairs.items():
-        A, B = ab["A"].to(device), ab["B"].to(device)
+        A = ab["A"].to(device=device, dtype=dtype)
+        B = ab["B"].to(device=device, dtype=dtype)
         for attr, sl in _targets(mod):
-            b = B if sl is None else B[sl]
+            b = B if sl is None else B[sl].contiguous()
             base = model.get_submodule(attr)
             if isinstance(base, LoRAWrapper):
                 base = base.base  # 叠多个 LoRA 时链式包
-            wrapper = LoRAWrapper(base, A, b, strength).to(device=device, dtype=dtype)
+            wrapper = LoRAWrapper(base, A, b, strength)
             parent, _, name = attr.rpartition(".")
-            setattr(model.get_submodule(parent), name, wrapper)
+            setattr(model.get_submodule(parent), name, wrapper)   # 注意: 不能对 wrapper 整体 .to(dtype) — 会把 fp8 基底 qdata 转 bf16 毁掉
             applied += 1
     return applied
