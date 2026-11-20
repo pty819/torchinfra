@@ -29,7 +29,7 @@ def timestep_embedding(t, dim=256):
     return torch.cat([args.cos(), args.sin()], dim=-1)
 
 
-_FP8_ATTN = _os.environ.get("QDIT_FP8_ATTN", "0") == "1"
+_FP8_ATTN = _os.environ.get("QDIT_FP8_ATTN", "1") == "1"   # 默认自研 fp8 attention; 纯PyTorch可用 QDIT_FP8_ATTN=0
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6, zero_center=False):
