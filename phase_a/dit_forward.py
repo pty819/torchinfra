@@ -121,16 +121,25 @@ class Block(nn.Module):
 
         h = F.layer_norm(x.float(), (HIDDEN,), eps=1e-6).to(x.dtype)
         h = scale_rows(h, m0i, m0t)
-        q = self.attn_norm_q(self.attn_to_q(h).view(B, S, 32, HEAD_DIM))
-        k = self.attn_norm_k(self.attn_to_k(h).view(B, S, 32, HEAD_DIM))
-        v = self.attn_to_v(h).view(B, S, 32, HEAD_DIM)
-        q, k = apply_rope(q, pe), apply_rope(k, pe)
         if _FP8_ATTN:
-            from fp8_attn import attention_fp8
-            o = attention_fp8(q, k, v)                      # [B,S,H*D] bf16
+            # B3: norm+rope+量化+pad+BHSD 单核融合, 跳过散装链
+            from fused_attn_input import attn_input_fp8_impl
+            from fp8_attn import fp8_flash_attn
+            q = self.attn_to_q(h).view(B, S, 32, HEAD_DIM)
+            k = self.attn_to_k(h).view(B, S, 32, HEAD_DIM)
+            v = self.attn_to_v(h).view(B, S, 32, HEAD_DIM)
+            q8, k8, v8, scl = attn_input_fp8_impl(q, k, v,
+                                                  self.attn_norm_q.weight, self.attn_norm_k.weight,
+                                                  pe[0], pe[1])
+            o = fp8_flash_attn(q8, k8, v8, scl, S)[:, :S].reshape(B, S, HIDDEN)
         else:
+            q = self.attn_norm_q(self.attn_to_q(h).view(B, S, 32, HEAD_DIM))
+            k = self.attn_norm_k(self.attn_to_k(h).view(B, S, 32, HEAD_DIM))
+            v = self.attn_to_v(h).view(B, S, 32, HEAD_DIM)
+            q, k = apply_rope(q, pe), apply_rope(k, pe)
+            o = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
             o = o.reshape(B, S, HIDDEN)
-        o = self.attn_to_out(o.reshape(B, S, HIDDEN))
+        o = self.attn_to_out(o)
         x = x + scale_rows(o, m1i, m1t)
 
         h = F.layer_norm(x.float(), (HIDDEN,), eps=1e-6).to(x.dtype)
