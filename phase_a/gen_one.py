@@ -7,8 +7,10 @@ import sys, time, torch
 import torch.nn.functional as F
 
 DEV = "cuda"
-PROMPT = sys.argv[1] if len(sys.argv) > 1 else "a lovely cat holding a wooden sign that says 'qwen fp8'"
-NEG = sys.argv[2] if len(sys.argv) > 2 else ""
+_args = [a for a in sys.argv[1:] if a != "compile"]
+SEED = int(_args[2]) if len(_args) > 2 else 42
+PROMPT = _args[0] if _args else "a lovely cat holding a wooden sign that says 'qwen fp8'"
+NEG = _args[1] if len(_args) > 1 else ""
 W = H = 1344
 STEPS = 20
 
@@ -82,9 +84,13 @@ ctx_d = torch.stack([ctx, neg]).to(DEV).to(torch.bfloat16)
 
 # ---------- 2. DiT 采样 (GPU, eager) ----------
 from loader import load_fp8
-from sample import sample
+from sample import sample, sample_er_sde
 from sigmas import flux_sigmas
 model = load_fp8(device=DEV, mode="fp8")
+if "compile" in sys.argv:
+    import torch as _t
+    print("[compile] 预热中...", flush=True)
+    model = _t.compile(model)
 Hl = Wl = H // 16
 n_img = Hl * Wl
 sig = flux_sigmas(STEPS, n_img).tolist()
@@ -94,7 +100,11 @@ t0 = time.time()
 def model_fn(x, c, t, pe, prefix):
     return model(x, c, t, pe, prefix)
 
-x = sample(model_fn, ctx_d[0:1], ctx_d[1:2], (64, Hl, Wl), sig, cfg=4.0, seed=42, device=DEV)
+SAMPLER = "euler" if "euler" in sys.argv else "er_sde"
+if SAMPLER == "er_sde":
+    x = sample_er_sde(model_fn, ctx_d[0:1], ctx_d[1:2], (64, Hl, Wl), sig, cfg=4.0, seed=SEED, device=DEV, dtype=torch.bfloat16)
+else:
+    x = sample(model_fn, ctx_d[0:1], ctx_d[1:2], (64, Hl, Wl), sig, cfg=4.0, seed=SEED, device=DEV)
 print(f"[{time.time()-t0:.0f}s] 采样完成: {tuple(x.shape)}", flush=True)
 del model, model_fn; import gc; gc.collect(); torch.cuda.empty_cache()  # 给 VAE 腾显存
 
@@ -130,5 +140,7 @@ with torch.no_grad():
     img = vae.decode(lat, return_dict=False)[0][:, :, 0]      # 取第 0 帧
 img = ((img.float() / 2 + 0.5).clamp(0, 1) * 255).byte()[0].cpu()
 from PIL import Image
-Image.fromarray(img.permute(1, 2, 0).numpy()).save("~/Pictures/qwen/qdit_first.png")
-print(f"[{time.time()-t0:.0f}s] 已存 ~/Pictures/qwen/qdit_first.png")
+import datetime
+out = f"~/Pictures/qwen/qwen_{datetime.datetime.now():%m%d_%H%M%S}_qdit-{SAMPLER}_s{SEED}.png"
+Image.fromarray(img.permute(1, 2, 0).numpy()).save(out)
+print(f"[{time.time()-t0:.0f}s] 已存 {out}")
