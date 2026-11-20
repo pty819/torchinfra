@@ -115,7 +115,7 @@ from diffusers.models import AutoencoderKLQwenImage21
 cfgd = json.load(open("~/models/qwen21/fp8/vae21_config.json"))
 cfgd.pop("_class_name", None); cfgd.pop("_diffusers_version", None)
 vae = AutoencoderKLQwenImage21(**cfgd).to(DEV, torch.bfloat16).eval()
-vae.enable_tiling(tile_sample_min_height=512, tile_sample_min_width=512, tile_sample_stride_height=256, tile_sample_stride_width=256)  # overlap 256px 压接缝
+vae.enable_tiling()  # 默认 tile256/stride192: 解码10s, 换回速度(淡竖纹回归)
 from safetensors.torch import load_file
 raw = load_file("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 sd = vae.state_dict()
