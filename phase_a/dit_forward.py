@@ -159,10 +159,10 @@ class QwenDiT(nn.Module):
         return self._rope_cache[key]
 
     def forward(self, x_latent, ctx, timestep, pe, prefix_len):
-        """x_latent: [B,16,Hl,Wl]; ctx: [B,Lt,4096]; timestep: [B] 0..1000; pe: rope 表 (文本段+图像段拼接顺序)"""
+        """x_latent: [B,64,Hl,Wl]; ctx: [B,Lt,4096]; timestep: [B] 0..1000; pe: rope 表 (文本段+图像段拼接顺序)"""
         B = x_latent.shape[0]
         if pe is None:  # 采样器未传则按形状缓存构建
-            pe = self._pe(ctx.shape[1], x_latent.shape[2] // 2, x_latent.shape[3] // 2, x_latent.device)
+            pe = self._pe(ctx.shape[1], x_latent.shape[2], x_latent.shape[3], x_latent.device)
         t = torch.stack([timestep, torch.zeros_like(timestep)], 1)          # [B,2]
         h = timestep_embedding(t.reshape(-1)).to(self.t_embed_1.weight.dtype)  # [2B,256]
         h = F.silu(self.t_embed_1(h))
@@ -182,16 +182,14 @@ class QwenDiT(nn.Module):
         return self._unpatchify(self.proj_out(joint), x_latent.shape)
 
     @staticmethod
-    def _patchify(x):  # [B,16,Hl,Wl] -> [B,16*2*2,(Hl/2)*(Wl/2)]
+    def _patchify(x):  # [B,64,Hl,Wl] -> [B, Hl*Wl, 64]  (对齐 sdcpp patchify(x,1,1))
         B, C, H, W = x.shape
-        p = x.view(B, C, H // 2, 2, W // 2, 2).permute(0, 1, 3, 5, 2, 4)
-        return p.reshape(B, C * 4, (H // 2) * (W // 2)).transpose(1, 2)
+        return x.permute(0, 2, 3, 1).reshape(B, H * W, C)
 
     @staticmethod
-    def _unpatchify(toks, shape):  # 逆操作
+    def _unpatchify(toks, shape):  # [B, Hl*Wl, 64] -> [B, 64, Hl, Wl]
         B, C, H, W = shape
-        p = toks.transpose(1, 2).view(B, C, 2, 2, H // 2, W // 2).permute(0, 1, 4, 2, 5, 3)
-        return p.reshape(B, C, H, W)
+        return toks.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
 
 # ---------------- rope (diffusers QwenEmbedRope 移植, axes [16,56,56]) ----------------
