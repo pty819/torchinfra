@@ -1,80 +1,80 @@
 # qwen21dit
 
 Qwen-Image-2.1 的手写 PyTorch 推理引擎 + 自研 ROCm/RDNA4 算子，运行于
-AMD Radeon RX 9070 GRE (gfx1201)。不依赖 diffusers，直接加载 fp8 权重，
-采样路径为自研 fp8 注意力内核 + hipBLASLt GEMM。
+AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。不依赖 diffusers，
+直接加载 fp8 权重，采样路径为自研 fp8 注意力内核 + hipBLASLt GEMM，
+文本编码器为纯 W8A8 int8（VNNI）。
 
-## 现状
+## 现状（2026-11-23）
 
-- 1344×1344 · 20 步 er_sde · CFG 4 · 固定 LoRA 三件套：**常驻 ~97 s/图**
-  （文本编码 ~1s + 采样 67-70s + VAE 解码 6-10s）
+- 1344×1344 · 20 步 er_sde · CFG 4 · 固定 LoRA 三件套：**79.5 s/图**（热路径）
+  （encode 0.5s + sample 72.8s + VAE 解码 5.6s）
 - 采样段速度 ≈ llama.cpp 系 (sdcpp) 的 **~2.2×**
-- `serve.py` 常驻 worker（HTTP 7861）+ web 面板（预热 / 提示词 / 进度 / 历史）
+- 文本编码器 hidden cos **0.9979**（纯 W8A8，无混合精度），内存 RSS 13.4GB
+  （原 bf16 全量 21.4GB + 11.8GB swap → 系统可用 1.5→19GB）
+- `serve.py` 常驻 worker（HTTP 7861，含 dec_s/dec_gpu_s 分段计时、/selftest
+  诊断端点）+ web 面板
 
 ## 用法
 
 ```bash
-~/rocm10/bin/python phase_a/serve.py          # 常驻 worker :7861
-python3 tools/qwen_web_app_minimal.py         # web 面板 :7860
+QDIT_ENC=sqrot ~/rocm10/bin/python phase_a/serve.py   # 默认: W8A8 组合版
+python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 ```
-
-## 目录
-
-- `phase_a/` 引擎本体：dit_forward / sample / loader / encoder / serve / fp8_attn / fused_attn_input / lora
-- `phase_a/tests/` 数值正确性测试
-- `docs/` 设计 spec、实施计划、验收报告
-- `tools/` 启动脚本与 web 面板
 
 ## 性能工作全史
 
-> 记录所有尝试（含定案无效的），避免重复劳动。硬件背景：RDNA4 =
-> fp8 WMMA 矩阵单元当代 + Ampere 级搬运能力（无 TMA/异步搬运引擎）。
+> 记录所有尝试（含定案无效的），避免重复劳动。硬件：RDNA4 = fp8 WMMA
+> 当代 + Ampere 级搬运（无 TMA）；Zen5 = AVX512-VNNI 全速 int8。
 
 ### 有效的（按收益排序）
 
 1. **自研 fp8 flash attention**（flydsl/WMMA）：92.6 TF @ MHA 32/32、
-   S=7102 = 34.7% WMMA 峰值（266.7 TF）。替代 SDPA，采样提速 ~2.2×。
-   fp8 全速率 WMMA 是 RDNA4 上唯一的大硬件红利。
-2. **rope+quant 融合 Triton kernel**（B1+B3）：注意力输入单遍完成
-   RoPE/拼接/量化，端到端 73→67s，attention bucket 510→275ms。
-3. **常驻 worker + 预热编译**：消除 dynamo 每图 ~34s 重编译
-   （含负向长度预热、cache_size_limit=128）；encoder 权重懒解压。
-4. **er_sde 采样器**（sdcpp denoiser 忠实移植）：质量项，非速度。
-5. **fp8 权重上挂 LoRA**：bf16 旁路不触碰 fp8 qdata。
+   S=7102 = 34.7% WMMA 峰值。替代 SDPA，采样提速 ~2.2×。
+2. **rope+quant 融合 Triton kernel**（B1+B3）：73→67s，attention bucket
+   510→275ms。
+3. **常驻 worker + 预热编译**：消除 dynamo 每图 ~34s 重编译。
+4. **encoder 纯 W8A8 三级演进**：
+   - SmoothQuant(α=0.75) 校准迁移：hidden cos 0.988，encode 1.0→0.4s，
+     权重落盘 9.87GB，RSS 21.4→13.4GB
+   - × 两级随机旋转（组间 QR 正交 + 组内 256 阶正则 Hadamard）：
+     cos 0.988→**0.9979**（smooth 迁移兜 massive activation，旋转管分布）
+   - 旋转挪 GPU 执行：encode 20.1→**0.5s**（40×；CPU 小 matmul 被 16 线程
+     fork/join 拖到 8 GFLOP/s 是根因）
+5. **er_sde 采样器**（sdcpp 忠实移植）：质量项。
+6. **fp8 权重上挂 LoRA**：bf16 旁路不触碰 fp8 qdata。
 
 ### 定案无效的（负结果存档）
 
-1. **warp-split 注意力**（wsplit → wsplit2）：按处方完整实现成对展开 +
-   K/V 双缓冲 + 任意 S 掩码，正确性 Δ≤0.0018 全配置达标，但 **50 TF vs
-   串行结构 92.6 TF（0.54×）**。根因：无 TMA 硬件下，wave 分组劈 KV 不
-   创造计算资源，却使 K/V 搬运次数 ×2（q tile 64 vs 128 行），另付跨组
-   merge + 双计数器开销。串行 8-wave 合搬摊销不可战胜。（torchinfra 仓库
-   wsplit2 存档；历史 74 TF 读数系测量虚高。）
-2. **hipBLASLt 裸调调研**（纯 C 垫片 + LD_PRELOAD，报告见 docs）：
-   `torch._scaled_mm` 调度层零开销、启发式算法即实测最优 → **GEMM 层
-   已在库天花板**，无自研空间。各形状：qkvo 139 TF（52% 峰值）、
-   gate/up 137 TF、down 投影 ~50 TF（19%）——down 是 K 维归约硬件洼地，
-   非软件可救。随机数据基准，0x33 填充会虚高 ~12%。
-3. **B2 批量 CFG + key 掩码**：数学正确但 77s vs 基线 73s，未过 ≤70s 门
-   （隔离在 phase-b2-attempt 分支）。附带教训：无掩码时零填充会毒害
-   cond/unreg 分支，cond/neg 必须分开 forward。
-4. **B3 2D grid 版本**：7168 micro-CTA 原子风暴 → 105s 回归，回退 1D。
-5. **VAE tiling**：仅在显存不足时应急（解码显著变慢），默认关闭。
-6. **encoder torch.compile**：46s 编译换 8-13%，不值；CPU eager 编码
-   0.5-2.3s 更优，权重懒解压首 forward 9.4s 只付一次。
+1. **warp-split 注意力**：完整成对展开+双缓冲+任意 S 掩码，正确性达标
+   但 50 TF vs 串行 92.6 TF（0.54×）。无 TMA 下 wave 分组必输 2× K/V 搬运
+   账。历史 74 TF 读数系测量虚高。
+2. **hipBLASLt 裸调**（纯 C 垫片）：torch 调度层零开销、heuristic 即最优
+   → GEMM 已在库天花板。down 投影 ~50 TF（19%）是归约硬洼地。
+3. **裸 W8A8 动态量化**（per-token + reduce_range）：cos 0.697 崩盘。
+   Qwen3 down_proj 输入 massive activation 达 11000×（max 6144 vs
+   median 0.54，layers 6/16/35）。
+4. **纯旋转（无 smooth）**：cos 0.943。前 17 层逐层 0.9998+ 证明旋转对
+   稀疏尖峰有效，但 L16/35 的 massive 旋转不散（DFRot 论文边界），
+   终点离散跳变。
+5. **混合降级层**（93 层 W8A16 兜底）：仅 +0.004 且逐层反量化慢，弃。
+6. **B2 批量 CFG**、**B3 2D grid**、**VAE tiling**、**encoder compile**：
+   各自未过门或负收益，详见 docs。
+7. **CPU W4**：VNNI 无 int4 路径，eager 解包反而更慢；留待手写融合 kernel。
 
 ### 已识别未做
 
-- **CUDA Graphs**：吞 launch 间隙，预计端到端 ~10s
-- **少步蒸馏 LoRA**（Viggle 6-step 方向）：采样 67→~20s 的最大单项杠杆
+- **VAE dec 剩余 3.8s CPU dispatch 间隙**（与换页无关，worker 大图 20 万次
+  dispatch 慢、小图正常之谜；子进程/compile 方案待做）
+- **CUDA Graphs**：预计端到端 ~10s
+- **少步蒸馏 LoRA**（6-step）：67→~20s 的最大单项杠杆
+- **GPTQ**：已评估——激活误差主导时（现格局）权重侧补偿无感，暂不做
 
-### 硬件上限的结论
+### 环境坑记录
 
-34.7% 注意力利用率是**结构级理性上限**：同机 hipBLASLt 裸 GEMM 也只有
-52%，attention 定义内的 softmax 标量链/pack/转置约占剩余差额；指令级
-残余预计可再 +10-20%，但属人肉 ISA 级投入且被端到端占比稀释。GEMM 与
-attention 两层均已到达该硬件的合理水位，下一档收益在框架层（graph 捕获）
-与算法层（蒸馏）。
+- 82 的 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments` 会直接 GPU core dump
+- serve.py `busy=true` 是 queue 缺 task_done 的误报（显示问题）
+- 新 prompt 长度触发 dynamo 重编译时 enc_s 首图会显示 ~10s（正常 0.5s）
 
 ## 许可
 
