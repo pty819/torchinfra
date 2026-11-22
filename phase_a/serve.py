@@ -42,10 +42,14 @@ def do_load(warmup_prompts):
     if S.model_c is not None:
         return {"ok": True, "note": "已驻留"}
     t0 = time.time()
-    from transformers import AutoTokenizer, Qwen3VLForConditionalGeneration
-    S.tok = AutoTokenizer.from_pretrained(ENC_DIR)
-    S.enc = Qwen3VLForConditionalGeneration.from_pretrained(ENC_DIR, torch_dtype=torch.bfloat16).eval()
-    S.drop = S.tok(SYS_TXT, return_tensors="pt")["input_ids"].shape[1]
+    if os.environ.get("QDIT_ENC", "sq") == "sq":
+        from encoder import load_encoder_sq
+        S.tok, S.enc, _lm, S.drop = load_encoder_sq()
+    else:
+        from transformers import AutoTokenizer, Qwen3VLForConditionalGeneration
+        S.tok = AutoTokenizer.from_pretrained(ENC_DIR)
+        S.enc = Qwen3VLForConditionalGeneration.from_pretrained(ENC_DIR, torch_dtype=torch.bfloat16).eval()
+        S.drop = S.tok(SYS_TXT, return_tensors="pt")["input_ids"].shape[1]
     from loader import load_fp8
     S.model = load_fp8(device="cuda", mode="fp8")
     S.model_c = torch.compile(S.model)
