@@ -170,15 +170,28 @@ def load_encoder_sqrot():
         xf = x.reshape(-1, K).float(); b = xf.shape[0]
         x1 = torch.matmul(xf.view(b, NG, _N0).transpose(1, 2), Hq.t()).transpose(1, 2)
         return (x1.reshape(-1, _N0) @ _R).reshape(shp)
+    _GPU = {"R": None, "HQ": {}}
     class RL(qdyn.Linear):
+        """旋转在 GPU 执行 (encode 时 GPU 空闲): 激活 38x4096 微小, 传输+旋转 <0.3ms/层,
+        CPU 上同形状小 matmul 被 16 线程 fork/join 拖到 ~10ms/层"""
         def __init__(self, i_, o_, wq, sinv, bias):
             super().__init__(i_, o_, bias_=bias is not None)
             self.set_weight_bias(wq, bias.float() if bias is not None else None)
             self.register_buffer("sinv", sinv)
         def forward(self, x):
-            xr = rot2(x.float() * self.sinv, hq_for(x.shape[-1]))
-            return torch.ops.quantized.linear_dynamic(
+            K = x.shape[-1]; NG = K // _N0
+            if _GPU["R"] is None:
+                _GPU["R"] = _R.float().cuda()
+            if K not in _GPU["HQ"]:
+                _GPU["HQ"][K] = hq_for(K).cuda()
+                _GPU["HQ"][("sinv", K)] = None
+            xg = x.float().cuda().reshape(-1, K)
+            b = xg.shape[0]
+            a = (xg * self.sinv.cuda()).view(b, NG, _N0).transpose(1, 2) @ _GPU["HQ"][K].t()
+            xr = (a.transpose(1, 2).reshape(-1, _N0) @ _GPU["R"]).reshape(b, K).cpu()
+            y = torch.ops.quantized.linear_dynamic(
                 xr, self._packed_params._packed_params, reduce_range=False).to(torch.bfloat16)
+            return y.reshape(*x.shape[:-1], -1)
     def pset(root, name, val):
         p = root
         for x_ in name.split(".")[:-1]:
