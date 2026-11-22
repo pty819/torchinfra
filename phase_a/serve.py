@@ -53,7 +53,10 @@ def do_load(warmup_prompts):
     for k in ("_class_name", "_diffusers_version"): cfgd.pop(k, None)
     from diffusers.models import AutoencoderKLQwenImage21
     S.vae = AutoencoderKLQwenImage21(**cfgd).to("cuda", torch.bfloat16).eval()
-    S.vae.enable_tiling()
+    _ts = int(os.environ.get("QDIT_VAE_TILE", "256"))
+    _tst = int(_ts * 0.75) // 32 * 32
+    S.vae.enable_tiling(tile_sample_min_height=_ts, tile_sample_min_width=_ts,
+                        tile_sample_stride_height=_tst, tile_sample_stride_width=_tst)
     from safetensors.torch import load_file
     raw = load_file(VAE_W)
     sd = S.vae.state_dict()
@@ -116,13 +119,22 @@ def do_generate(jid, req):
 
     t2 = time.time()
     lat = (x.unsqueeze(2).to("cuda", torch.bfloat16) * S.std + S.mean).to(torch.bfloat16)
+    td = time.time()
+    _ev0, _ev1 = torch.cuda.Event(True), torch.cuda.Event(True)
+    _ev0.record()
     img = S.vae.decode(lat, return_dict=False)[0][:, :, 0]
+    _ev1.record()
+    torch.cuda.synchronize()
+    tp = time.time()
+    S.jobs[jid].update(dec_gpu_s=round(_ev0.elapsed_time(_ev1) / 1000, 1))
     img = ((img.float() / 2 + 0.5).clamp(0, 1) * 255).byte()[0].cpu()
     from PIL import Image
     os.makedirs(OUTDIR, exist_ok=True)
     out = f"{OUTDIR}/qwen_{datetime.datetime.now():%m%d_%H%M%S}_qdit-{sampler}_s{seed}.png"
     Image.fromarray(img.permute(1, 2, 0).numpy()).save(out)
-    S.jobs[jid].update(vae_s=round(time.time() - t2, 1), total_s=round(time.time() - t0, 1), image=out)
+    S.jobs[jid].update(vae_s=round(time.time() - t2, 1),
+                      dec_s=round(tp - td, 1), post_s=round(time.time() - tp, 1),
+                      total_s=round(time.time() - t0, 1), image=out)
     return out
 
 # ---------------- 任务线程 + HTTP ----------------
@@ -135,6 +147,39 @@ def worker():
                 j.update(S.jobs[jid].get("phase", "") or {}, **do_load(req.get("warmup_prompts")))
             elif kind == "unload":
                 j.update(do_unload())
+            elif kind == "selftest":
+                import time as _t
+                with torch.no_grad():
+                    _lat = (torch.randn(1, 64, 1, 11, 11, device="cuda", dtype=torch.bfloat16) * 3)
+                    _lat = (_lat * S.std.view(1, 64, 1, 1, 1) + S.mean.view(1, 64, 1, 1, 1)).to(torch.bfloat16)
+                    def _bench(fn, n=10, warm=3):
+                        for _ in range(warm): fn()
+                        torch.cuda.synchronize(); t0 = _t.perf_counter()
+                        for _ in range(n): fn()
+                        torch.cuda.synchronize()
+                        return (_t.perf_counter() - t0) / n
+                    S.vae.disable_tiling()
+                    _tb = _bench(lambda: S.vae.decode(_lat, return_dict=False))
+                    S.vae.enable_tiling(tile_sample_min_height=64, tile_sample_min_width=64,
+                                        tile_sample_stride_height=48, tile_sample_stride_width=48)
+                    _tt = _bench(lambda: S.vae.decode(_lat, return_dict=False))
+                    if req.get("big"):
+                        from torch.profiler import profile, ProfilerActivity
+                        _g = torch.Generator(device="cuda").manual_seed(3)
+                        _big = (torch.randn(1, 64, 1, 84, 84, device="cuda", dtype=torch.bfloat16, generator=_g) * 3)
+                        _big = (_big * S.std.view(1, 64, 1, 1, 1) + S.mean.view(1, 64, 1, 1, 1)).to(torch.bfloat16)
+                        with torch.no_grad():
+                            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as _prof:
+                                S.vae.decode(_big, return_dict=False)
+                        _rows = sorted(_prof.key_averages(), key=lambda e: -max(e.self_device_time_total, e.self_cpu_time_total))[:12]
+                        j.update(prof="\n".join(
+                            f"{e.key[:46]:<46} gpu={e.self_device_time_total/1000:7.1f}ms cpu={e.self_cpu_time_total/1000:7.1f}ms n={e.count}"
+                            for e in _rows))
+                    _ts = int(os.environ.get("QDIT_VAE_TILE", "256"))
+                    _tst = int(_ts * 0.75) // 32 * 32
+                    S.vae.enable_tiling(tile_sample_min_height=_ts, tile_sample_min_width=_ts,
+                                        tile_sample_stride_height=_tst, tile_sample_stride_width=_tst)
+                    j.update(base_ms=round(_tb * 1000, 1), tile16_ms=round(_tt * 1000, 1), status="done")
             elif kind == "generate":
                 if S.model_c is None:
                     j.update(status="error", error="引擎未加载, 先 POST /load")
