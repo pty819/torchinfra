@@ -79,10 +79,11 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 - **CUDA Graphs**：预计端到端 ~10s
 - **少步蒸馏 LoRA**（6-step）：67→~20s 的最大单项杠杆
 - **GPTQ**：已评估——激活误差主导时（现格局）权重侧补偿无感，暂不做
-- **采样段 2.06× 回归（2026-11-23 发现）**：同条件 20 步 1344² 149.7s vs
-  史上 72.8s。已二分排除 encoder（新旧版同慢）；裸 GPU GEMM 满血 98 TF、
-  dec_gpu 1.8s 与参考一致 → 回归隔离在 DiT 采样环内（fp8 attention /
-  Triton glue / 派发层）。机器 uptime 3 天，待复机后复测
+- **"采样 2.06× 回归"系误报（2026-11-23 查明，非回归）**：逐新 prompt 测得
+  149.7s 的真因是 **ctx 长度 LT 变化触发整图 dynamo 重编译（+29~70s/新长度）**，
+  热路径实测 76.5s 与历史 72.8s 一致；fp8 GEMM 210TF/attention 266ms/裸 GEMM
+  98TF 全部健康。已知架构税：torch.compile 静态分形状，每个新 LT 首图慢
+  ~30-70s——可做 LT 分桶（pad 到 16 倍数）或 dynamic compile 消除
 
 ### 环境坑记录
 
