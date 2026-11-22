@@ -42,9 +42,9 @@ def do_load(warmup_prompts):
     if S.model_c is not None:
         return {"ok": True, "note": "已驻留"}
     t0 = time.time()
-    if os.environ.get("QDIT_ENC", "sq") == "sq":
-        from encoder import load_encoder_sq
-        S.tok, S.enc, _lm, S.drop = load_encoder_sq()
+    if os.environ.get("QDIT_ENC", "sqrot") == "sqrot":
+        from encoder import load_encoder_sqrot
+        S.tok, S.enc, _lm, S.drop = load_encoder_sqrot()
     else:
         from transformers import AutoTokenizer, Qwen3VLForConditionalGeneration
         S.tok = AutoTokenizer.from_pretrained(ENC_DIR)
