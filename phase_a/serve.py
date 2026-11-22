@@ -42,7 +42,11 @@ def do_load(warmup_prompts):
     if S.model_c is not None:
         return {"ok": True, "note": "已驻留"}
     t0 = time.time()
-    if os.environ.get("QDIT_ENC", "sqrot") == "sqrot":
+    _encm = os.environ.get("QDIT_ENC", "sqrot2")
+    if _encm == "sqrot2":
+        from encoder import load_encoder_sqrot2
+        S.tok, S.enc, _lm, S.drop = load_encoder_sqrot2()
+    elif _encm == "sqrot":
         from encoder import load_encoder_sqrot
         S.tok, S.enc, _lm, S.drop = load_encoder_sqrot()
     else:

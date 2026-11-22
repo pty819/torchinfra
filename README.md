@@ -10,7 +10,10 @@ AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。不依赖 diffusers，
 - 1344×1344 · 20 步 er_sde · CFG 4 · 固定 LoRA 三件套：**79.5 s/图**（热路径）
   （encode 0.5s + sample 72.8s + VAE 解码 5.6s）
 - 采样段速度 ≈ llama.cpp 系 (sdcpp) 的 **~2.2×**
-- 文本编码器 hidden cos **0.9979**（纯 W8A8，无混合精度），内存 RSS 13.4GB
+- 文本编码器 hidden cos **0.9984**（纯 W8A8，无混合精度）：sqrot2 = 全蝶形
+  CPU 旋转（组内 B4^⊗4 + 组间 B4^⊗2/O3⊗B4^⊗2，torch.compile 融合）+ qkv/gateup
+  组入口合并（旋转 252→144 次），编码零 GPU 依赖；enc 0.5s 与 GPU 版持平
+  （该长度下瓶颈是 252 次 GEMM 派发而非旋转）。RSS 13.4→16.5GB 档
   （原 bf16 全量 21.4GB + 11.8GB swap → 系统可用 1.5→19GB）
 - `serve.py` 常驻 worker（HTTP 7861，含 dec_s/dec_gpu_s 分段计时、/selftest
   诊断端点）+ web 面板
@@ -18,7 +21,8 @@ AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。不依赖 diffusers，
 ## 用法
 
 ```bash
-QDIT_ENC=sqrot ~/rocm10/bin/python phase_a/serve.py   # 默认: W8A8 组合版
+QDIT_ENC=sqrot2 ~/rocm10/bin/python phase_a/serve.py  # 默认: W8A8 蝶形合并版
+# QDIT_ENC=sqrot 退回 GPU 旋转版 (长 prompt b≥500 时编码更快)
 python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 ```
 
@@ -41,6 +45,12 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
      cos 0.988→**0.9979**（smooth 迁移兜 massive activation，旋转管分布）
    - 旋转挪 GPU 执行：encode 20.1→**0.5s**（40×；CPU 小 matmul 被 16 线程
      fork/join 拖到 8 GFLOP/s 是根因）
+   - sqrot2 蝶形化（方案1+2）：两级旋转全部改 O(K·logK) 加减蝶形
+     （compiled b=80 单次 0.27ms vs matmul 14.6ms），qkv/gateup 共享 smooth s
+     后旋转入口合并 252→144；cos 0.9979→**0.9984**，编码摆脱 GPU/PCIe。
+     诚实结论：典型 prompt (b≈40) 下 enc 墙钟不变（0.5s，瓶颈是 GEMM 派发）；
+     b=506 时 CPU 蝶形与 GEMM 抢核反输 GPU 版 11%（7.3 vs 6.6s）。价值在
+     cos 提升 + 编码与 GPU 采样可并行。权重: int8_qwen3vl8b_sqrot2.safetensors
 5. **er_sde 采样器**（sdcpp 忠实移植）：质量项。
 6. **fp8 权重上挂 LoRA**：bf16 旁路不触碰 fp8 qdata。
 
@@ -69,6 +79,10 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 - **CUDA Graphs**：预计端到端 ~10s
 - **少步蒸馏 LoRA**（6-step）：67→~20s 的最大单项杠杆
 - **GPTQ**：已评估——激活误差主导时（现格局）权重侧补偿无感，暂不做
+- **采样段 2.06× 回归（2026-11-23 发现）**：同条件 20 步 1344² 149.7s vs
+  史上 72.8s。已二分排除 encoder（新旧版同慢）；裸 GPU GEMM 满血 98 TF、
+  dec_gpu 1.8s 与参考一致 → 回归隔离在 DiT 采样环内（fp8 attention /
+  Triton glue / 派发层）。机器 uptime 3 天，待复机后复测
 
 ### 环境坑记录
 
