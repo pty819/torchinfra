@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import triton
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from torchinfra.nemotron_rerank import (  # noqa: E402
+from nemotron_serving.nemotron_rerank import (  # noqa: E402
     FA8_STAGES, FA8_TK, FA8_TQ, FA8_WARPS, FP8_MAX, HD, NKV, NQ, ROPE_ORIG,
     ROPE_TR, ROPE_WARPS, _fp8_attn_kernel, _rope_qkv_fp8_kernel, rope_tables,
 )

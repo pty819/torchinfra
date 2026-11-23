@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import triton
 
 sys.path.insert(0, ".")
-from torchinfra.nemotron_rerank import (
+from nemotron_serving.nemotron_rerank import (
     yarn_inv_freq, rope_tables, _rope_qkv_kernel, NQ, NKV, HD, ROPE_TR, ROPE_WARPS,
     ROPE_ORIG)
 

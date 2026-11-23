@@ -24,8 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 import torch.nn.functional as F
 
-from torchinfra.jina_rerank import JinaReranker, _format_prompt
-from torchinfra.nemotron_rerank import NemotronReranker
+from .jina_rerank import JinaReranker, _format_prompt
+from .nemotron_rerank import NemotronReranker
 
 
 class RerankScheduler:

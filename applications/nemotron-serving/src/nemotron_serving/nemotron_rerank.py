@@ -47,7 +47,7 @@ from torchinfra.fp8_ckpt import is_fp8_checkpoint
 from torchinfra.triton_kernels import triton_rmsnorm, triton_rmsnorm_amax
 from torchinfra.triton_kernels.silu import silu_mul_amax
 from torchinfra.fp8_linear import fp8_linear_q
-from torchinfra.jina_rerank import transpose_amax
+from .jina_rerank import transpose_amax
 
 LAYER_PREFIX = "model.language_model.layers"
 N_LAYERS = 34
@@ -314,7 +314,7 @@ FP8_ATTN_MIN_S = 2049
 # FlyDSL 自研 kernel（flydsl_kernels/，aiter bf16 flash 骨架 + 双 fp8
 # WMMA 16x16x16 + P×448 自洽量化 + 零同步 device scale）：GQA 32Q/8KV
 # 实测 84–88 TF（vs bf16 flash 55–76），32K 单层 322→206ms，已启用。
-# 旧 Triton kernel 保留为对照（tools/test_fp8_attn.py 持续把关）。
+# 旧 Triton kernel 保留为对照（applications/nemotron-serving/scripts/test_fp8_attn.py 持续把关）。
 FP8_ATTN_DISABLED = False
 FP8_ATTN_BACKEND = 'flydsl'  # 'flydsl' | 'triton' 
 FA8_TQ = 64

@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, ".")
-from torchinfra.jina_rerank import JinaReranker, _format_prompt, DOC_ID  # noqa: E402
+from nemotron_serving.jina_rerank import JinaReranker, _format_prompt, DOC_ID  # noqa: E402
 
 FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
 

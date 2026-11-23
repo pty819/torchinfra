@@ -15,6 +15,18 @@ members = [
 ]
 
 [[package]]
+name = "amd-torch-device-gfx12-0"
+version = "2.15.0+rocm10.2.0"
+source = { registry = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" }
+dependencies = [
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx12-0/amd_torch_device_gfx12_0-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx12-0/amd_torch_device_gfx12_0-2.15.0%2Brocm10.2.0-cp314-cp314-win_amd64.whl" },
+]
+
+[[package]]
 name = "amd-torch-device-gfx1201"
 version = "2.15.0+rocm10.2.0"
 source = { registry = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" }
@@ -530,14 +542,21 @@ dependencies = [
     { name = "transformers" },
 ]
 
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.2.0" },
     { name = "safetensors", specifier = ">=0.8.0" },
     { name = "torch", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
     { name = "torchinfra", editable = "." },
     { name = "transformers", specifier = ">=5.12.1" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "networkx"
@@ -1110,6 +1129,7 @@ name = "torchinfra"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "amd-torch-device-gfx12-0" },
     { name = "amd-torch-device-gfx1201" },
     { name = "flydsl" },
     { name = "numpy" },
@@ -1126,6 +1146,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "amd-torch-device-gfx12-0", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
     { name = "amd-torch-device-gfx1201", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
     { name = "flydsl", specifier = ">=0.4.1" },
     { name = "numpy", specifier = ">=2.5.3" },

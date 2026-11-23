@@ -9,7 +9,7 @@ import json, sys
 import torch
 
 sys.path.insert(0, ".")
-from torchinfra.nemotron_rerank import NemotronReranker
+from nemotron_serving.nemotron_rerank import NemotronReranker
 
 import os
 MODEL = os.environ.get("NEMO_MODEL", os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-FP8"))

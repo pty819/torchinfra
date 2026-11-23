@@ -5,7 +5,7 @@ import torch
 import triton
 
 sys.path.insert(0, ".")
-from torchinfra.jina_rerank import _qk_norm_rope_kernel  # noqa: E402
+from nemotron_serving.jina_rerank import _qk_norm_rope_kernel  # noqa: E402
 
 NQ, NKV, D = 16, 8, 128
 HALF = D // 2

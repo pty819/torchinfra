@@ -67,7 +67,7 @@ def main():
         ok &= d == 0.0
 
     # transpose_amax：SDPA 输出 [B,H,S,D] → 转置 + 行 amax，与旧两步 bit-exact
-    from torchinfra.jina_rerank import _window_attn_kernel, transpose_amax, \
+    from nemotron_serving.jina_rerank import _window_attn_kernel, transpose_amax, \
         WINDOW, WIN_TQ, WIN_TK, WIN_WARPS, WIN_STAGES
     import triton
     B, H, NKV, D = 2, 16, 8, 128

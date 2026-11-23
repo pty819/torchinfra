@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import triton
 
 sys.path.insert(0, ".")
-from torchinfra.jina_rerank import _window_attn_kernel  # noqa: E402
+from nemotron_serving.jina_rerank import _window_attn_kernel  # noqa: E402
 
 H, KV, D, W = 16, 8, 128, 1024
 SM = D ** -0.5

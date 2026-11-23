@@ -11,7 +11,9 @@ dependencies = [
     "rocm[libraries,devel,device-gfx1201]>=10.2.0",
     "torch>=2.15.0",
     "triton>=3.9.0",
+    # gfx1201 kpack + gfx12-family AOTriton SDPA images
     "amd-torch-device-gfx1201>=2.15.0",
+    "amd-torch-device-gfx12-0>=2.15.0",
     "flydsl>=0.4.1",
     "safetensors>=0.8.0",
     "numpy>=2.5.3",
@@ -37,6 +39,7 @@ rocm = { index = "rocm" }
 torch = { index = "rocm-pytorch" }
 triton = { index = "rocm-pytorch" }
 amd-torch-device-gfx1201 = { index = "rocm-pytorch" }
+amd-torch-device-gfx12-0 = { index = "rocm-pytorch" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["torchinfra", "flydsl_kernels"]

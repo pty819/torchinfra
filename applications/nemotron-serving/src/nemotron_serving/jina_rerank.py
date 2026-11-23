@@ -168,7 +168,7 @@ def transpose_amax(out: torch.Tensor):
 DOC_ID = 151670
 QUERY_ID = 151671
 WINDOW = 1024
-# 滑窗 kernel 的 launch 配置（tools/bench_window_cfg.py 扫出来的最优档：
+# 滑窗 kernel 的 launch 配置（applications/nemotron-serving/scripts/bench_window_cfg.py 扫出来的最优档：
 # 三段式免掩码下 64/64/w4/st1 最优——st2/大 tile 在 gfx1201 上反而慢 2x）
 WIN_TQ = 64
 WIN_TK = 64

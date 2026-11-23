@@ -1,9 +1,13 @@
-import os
 """jina-reranker-v3.5：自研前向与官方 HF forward 的分数对拍。"""
+import os
+
+import pytest
 import torch
 from transformers import AutoModel
 
-from torchinfra.jina_rerank import JinaReranker, _format_prompt
+from nemotron_serving.jina_rerank import JinaReranker, _format_prompt
+
+pytestmark = pytest.mark.gpu
 
 PATH = os.path.expanduser("~/models/jina-reranker-v3.5")
 
@@ -55,6 +59,10 @@ def main():
     assert err_l < 0.01, err_l
     print(f"jina rerank OK（单条 {err:.4f}，单块 {err_r:.4f}，两块 {err_m:.4f}，"
           f"滑窗长块 {err_l:.4f}）")
+
+
+def test_jina_rerank_matches_hf():
+    main()
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ waves_per_eu 仅 8K 处 wpe=1 比默认省 3%）。AMD 出厂已调好。
 ## 附2：fp8 flash attention 上线（P16，2026-10-24 深夜）
 
 - 文件：`flydsl_kernels/flash_attn_fp8_gfx1201.py` + `fp8_wrapper.py`；
-  `torchinfra/nemotron_rerank.py` 的 `_attn_fp8` 走 `FP8_ATTN_BACKEND='flydsl'`。
+  `applications/nemotron-serving/src/nemotron_serving/nemotron_rerank.py` 的 `_attn_fp8` 走 `FP8_ATTN_BACKEND='flydsl'`。
 - 数学：P14 全套（descale 折 exp2 尺度、P×448、分母同量化域）+ 零同步
   device SCL 指针；GQA 用寻址数学（wave 不跨 query head）；
   真实 S/padded S 分离 → 任意 padding 长度安全（无 aiter 的 0.5% 限制）。
@@ -248,7 +248,7 @@ tile 起点，把合法最后 tile 错钳成错位数据（S=2050 Δ 0.0036）�
 ## 附6：warp split（FA2 式组内 KV 分治）——原语全通，kernel 卡嵌套 while（2026-10-25）
 
 ### 动机与设计
-32K 热点剖析（tools/profile_nemotron32k.py）：注意力 62% / GEMM 26%（已贴
+32K 热点剖析（applications/nemotron-serving/scripts/profile_nemotron32k.py）：注意力 62% / GEMM 26%（已贴
 fp8 天花板 114-128 TF）。注意力的 ~1200cyc/tile 串行墙对四个单点结构修改
 全部免疫（附5）——根因是 8 wave 锁步同相位（softmax 时全 VALU、GEMM 时
 全 WMMA）。FA2 的解法 = warp 级任务划分。RDNA 上的可行形态：

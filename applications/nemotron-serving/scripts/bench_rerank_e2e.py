@@ -2,7 +2,7 @@ import os
 """rerank 端到端延迟基准：分解 plan(tokenize) / encode / 前向 / 合并。
 
 用法：
-    PYTHONPATH=. ~/rocm10/bin/python tools/bench_rerank_e2e.py [--bf16] [--n N]
+    uv run python applications/nemotron-serving/scripts/bench_rerank_e2e.py [--bf16] [--n N]
 """
 import argparse
 import time
@@ -10,7 +10,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from torchinfra.jina_rerank import JinaReranker, _format_prompt
+from nemotron_serving.jina_rerank import JinaReranker, _format_prompt
 
 FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
 BF16 = os.path.expanduser("~/models/jina-reranker-v3.5")

@@ -7,9 +7,9 @@ PyTorch 之上的迷你 LLM 推理引擎与自定义算子学习栈（ROCm / Rad
 
 ## 目录结构
 
-- `torchinfra/`、`flydsl_kernels/`：共享 FP8/Triton/FlyDSL 算子、模型实现与测试。
+- `torchinfra/`、`flydsl_kernels/`：共享 FP8/Triton/FlyDSL 算子、通用 Qwen3 模型与测试。
 - `applications/qwen21dit/`：Qwen-Image-2.1 生成应用（DiT、文本编码器、VAE、worker、Gradio）。
-- `applications/nemotron-serving/`：Nemotron/Jina rerank HTTP 应用。
+- `applications/nemotron-serving/`：Nemotron/Jina rerank 应用（模型实现、调度、HTTP 服务、基准与对拍）。
 
 ## 安装
 
@@ -28,7 +28,7 @@ AMD GPU 驱动。首次安装后若 JIT 扩展报错，在 `.venv` 内执行一�
 
 | 层 | 依赖 |
 | --- | --- |
-| `torchinfra` 核心 | ROCm 10.2 pip 用户态（core/libraries/devel/device-gfx1201）、PyTorch 2.15.0+rocm10.2.0、Triton 3.9、FlyDSL 0.4.1、safetensors、NumPy |
+| `torchinfra` 核心 | ROCm 10.2 pip 用户态（core/libraries/devel）、PyTorch 2.15.0+rocm10.2.0、Triton 3.9、FlyDSL 0.4.1、`amd-torch-device-gfx1201`（kpack）、`amd-torch-device-gfx12-0`（AOTriton SDPA images）、safetensors、NumPy |
 | `qwen21dit` | Transformers 5.12、Diffusers 0.43、Pillow、Gradio（`web` extra） |
 | `nemotron-serving` | Transformers 5.12、safetensors |
 | 宿主 | AMD GPU 驱动（不由 pip 提供） |
@@ -48,6 +48,10 @@ FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
   等头文件）并把 device 文件链接进 devel 树。未展开时 JIT 扩展编译会报
   `thrust/complex.h file not found`；展开前 torch 把 ROCM_HOME 解析到
   `_rocm_sdk_core`，展开后正确解析到 `_rocm_sdk_devel`
+- **SDPA 需要 `amd-torch-device-gfx12-0`**：它把
+  `torch/lib/aotriton.images/amd-gfx120x/` 装进 torch。缺这个包时 flash/efficient
+  SDPA 会报 `hipErrorInvalidImage`，只剩 math 后端；`amd-torch-device-gfx1201`
+  只提供 `.kpack`，两个包都要有
 - `PYTORCH_ROCM_ARCH=gfx1201` 由 `torchinfra/kernels/loader.py` 自动设置，
   无需手动 export
 - loader 额外传了 `--rocm-device-lib-path=$ROCM_HOME/lib/llvm/amdgcn/bitcode`
@@ -331,12 +335,12 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 ## P11 — jina-reranker-v3.5 重排路径（Qwen3-0.6B 骨干 + 混合滑窗 + FP8）
 
 jina-reranker-v3.5 = Qwen3-0.6B 骨干 + 16/28 层滑窗注意力 + projector 余弦打分。
-`torchinfra/jina_rerank.py` 在引擎之上自研前向（注意力走 SDPA / 自研滑窗 kernel，
-norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`applications/nemotron-serving/.../server.py`
+`applications/nemotron-serving/src/nemotron_serving/jina_rerank.py` 在引擎之上自研前向（注意力走 SDPA / 自研滑窗 kernel，
+norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`applications/nemotron-serving/src/nemotron_serving/server.py`
 提供 vLLM 风格 `/v1/rerank` 并发服务（调度器多请求块拼批）。对拍
-（`tests/test_jina_rerank.py`，vs 官方 HF forward）：分数误差 < 0.005。
+（`applications/nemotron-serving/tests/gpu/test_jina_rerank.py`，vs 官方 HF forward）：分数误差 < 0.005。
 
-本轮 e2e 压延迟（tools/bench_rerank_e2e.py，5 档负载，fp8）：
+本轮 e2e 压延迟（applications/nemotron-serving/scripts/bench_rerank_e2e.py，5 档负载，fp8）：
 
 | 负载 | 基线 e2e | 本轮 | 变化 |
 |---|---|---|---|
@@ -358,7 +362,7 @@ norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`ap
    （57 TFLOPS，2x）。**踩坑**：首版三段边界用理想区间值，段 2 末块越过界、
    段 3 从界值起步 → 重叠 k 双计（对拍差 0.06 暴露）；改为三段共用锚定
    start 的 TK 网格后对拍干净（含 B=2 左 padding、S 跨 1024/2048 边界组）。
-   配置扫描（tools/bench_window_cfg.py）：64/64/w4/st1 最优，st2/大 tile
+   配置扫描（applications/nemotron-serving/scripts/bench_window_cfg.py）：64/64/w4/st1 最优，st2/大 tile
    在 gfx1201 上慢 2x（与 P6 结论一致）。
 3. **qk-norm+RoPE kernel 兼写 v**：v 原为 qkv 切片后 permute+contiguous
    （每层一次 transpose 型拷贝，~170GB/s）；改为在三合一 kernel 里顺带搬运
@@ -367,7 +371,7 @@ norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`ap
    RMSNorm 分母写成 64（(a²+b²) 逐元素相加后 mean(-1)），一度冤枉 kernel
    错 √2——新旧 kernel 逐位一致，手算才定位是参考错。
 4. **整前向 CUDA Graph 分桶捕获（≤8192）**：右 padding + 静态 buffer 懒捕获
-   （tools/test_graph_path.py 对拍）。两个坑：① `bool(valid.all())` 主机同步
+   （applications/nemotron-serving/scripts/test_graph_path.py 对拍）。两个坑：① `bool(valid.all())` 主机同步
    会使捕获直接作废（也挡 eager 流水）——改为调用方 CPU 侧判定传入；
    ② **右 padding 行不清零会污染 tensorwise fp8 量化的 amax**（pad 行激活
    改变整批 scale）——图内嵌入后按 rowmask 清零，零行对 amax 无贡献且
@@ -398,7 +402,7 @@ SDPA 输出的 transpose+contiguous 拷贝与 amax 合成 `_transpose_amax_kerne
 （掩码行记 0；全掩码 tile 的 acc/l_i=NaN 必须 where 掉再归约）。两轮后
 `_row_amax` 调用归零。**数值**：partial 一律取 bf16 舍入后的值（量化
 kernel 读回的同一 bit pattern），amax 与归约顺序无关 → partial 与全量
-行 amax 逐位一致、q 逐位一致（tools/test_fused_quant_parity.py 全 0，
+行 amax 逐位一致、q 逐位一致（applications/nemotron-serving/scripts/test_fused_quant_parity.py 全 0，
 含 transpose_amax、滑窗 partial、左 padding 组）。e2e（同 bench，两轮
 累计 vs P11）：8×64 15.2→14.4ms、32×256 200→194.1、100×256 995→973、
 20×512 259→252.2、200×512 6172→6075（-28ms，与每层省一趟 attn_out
@@ -449,7 +453,7 @@ OOM；修复前 130 篇 453ms → 修复后 64ms）。
 与各长度桶的图捕获（首轮慢 3-10 倍属正常）。注意无鉴权，暴露到局域网
 （含 tailscale 侧）需自行加防火墙规则。
 
-**torch.compile 负结果（2026-10-23 实测，tools/bench_compile_rerank.py）**：
+**torch.compile 负结果（2026-10-23 实测，applications/nemotron-serving/scripts/bench_compile_rerank.py）**：
 对 reranker 前向直接 compile 不可用——S=767 能编译但**慢于 eager**
 （15.3 vs 13.9ms，0.91x）且**数值错**（hidden 相对误差 9.2e-2，P8
 _fused_kernel 深层链翻转 bug 同款现象，长链触发、对拍拦截）；S=8782
@@ -461,7 +465,7 @@ _fused_kernel 深层链翻转 bug 同款现象，长链触发、对拍拦截）�
 
 ## P13 — Nemotron-3.5-Rerank-8B 移植（ministral3 双向塔 + FP8 + 32K，2026-10-24）
 
-`torchinfra/nemotron_rerank.py`：NVIDIA Nemotron-3.5-Rerank-8B（Mistral3
+`applications/nemotron-serving/src/nemotron_serving/nemotron_rerank.py`：NVIDIA Nemotron-3.5-Rerank-8B（Mistral3
 序列分类壳 + ministral3 文本塔，34 层 / hidden 4096 / 32Q8KV×128 /
 SwiGLU 14336）从 transformers 5.12.1 逐条移植到 torchinfra fp8 栈。
 架构要点（与 jina 骨干的三处关键差异）：**全双向注意力**（无 is_causal）；
@@ -470,7 +474,7 @@ SwiGLU 14336）从 transformers 5.12.1 逐条移植到 torchinfra fp8 栈。
 kernel 用 constexpr 关掉；16K–32K 段 ≈1.069 只乘 Q）。打分 = final
 RMSNorm → mask mean-pool → fp32 Linear(4096→1)。
 
-性能设计与实测（B=1，`tools/bench_nemotron.py`）：
+性能设计与实测（B=1，`applications/nemotron-serving/scripts/bench_nemotron.py`）：
 
 | S | 路径 | 延迟 | tok/s | 峰值显存 |
 |---|---|---|---|---|
@@ -499,12 +503,12 @@ B=1 且 S≤2048 走 CUDA graph 分桶（右 padding 256 对齐，vlen 走
 static tensor replay 时改写），更大 S 图收益抵不过自研 kernel 与
 flash 的差距，走 eager flash。
 
-精度（`tools/test_nemotron_e2e.py`，vs CPU bf16 transformers 参考 8 对）：
+精度（`applications/nemotron-serving/scripts/test_nemotron_e2e.py`，vs CPU bf16 transformers 参考 8 对）：
 max|Δ|=0.091（阈值 0.3），**打分排序全保**；等长 batch 逐位一致；
 右 padding batch vs 单条 Δ≤0.025——非 bug，是 tensorwise fp8 固有
 （整批一个 scale，批组成变则同伴文档的量化步长跟着变），各自离 bf16
 参考仍 <0.05。yarn 表 float32 逐位对齐 transformers（float64 反而有
-6e-8 偏差）。参考生成 `tools/nemotron_cpu_ref.py`（CPU bf16 eager）。
+6e-8 偏差）。参考生成 `applications/nemotron-serving/scripts/nemotron_cpu_ref.py`（CPU bf16 eager）。
 
 **踩坑两记（本轮最大成本，都值得进族谱）**：
 ① **stride(0) 语义陷阱**：rope kernel 按 [B*S, C] 展平行寻址，调用处传
@@ -618,7 +622,7 @@ P 是算出来的（MMA accumulator 布局），必须绕 SMEM 转成操作数�
 Triton 表达不了 CK 的 warp-specialized 流水；在线 softmax 的
 max→exp→量化→dot 串行依赖链（unroll2/跳过重缩放/w8/st≥2/TK=128/
 K 预转置全试过，全部持平或更差，TK=128 因 PV 收缩维疑似超 fp8 MMA
-宽度直接掉到 1/3）。kernel 与单测（`tools/test_fp8_attn.py`）保留，
+宽度直接掉到 1/3）。kernel 与单测（`applications/nemotron-serving/scripts/test_fp8_attn.py`）保留，
 Triton/ROCm 补上 warp specialization / TMA 后置 False 重验即可。
 
 当前性能（FP8S，回退 flash 后）：S=512 64.4ms/7947 tok/s、S=8192

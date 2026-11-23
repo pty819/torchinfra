@@ -1,6 +1,6 @@
 """Nemotron 32K 单序列 e2e 热点剖析：kernel 级时间按功能桶聚合。
 
-用法：PYTHONPATH=. python tools/profile_nemotron32k.py [S]
+用法：uv run python applications/nemotron-serving/scripts/profile_nemotron32k.py [S]
 """
 import os
 import re
@@ -11,7 +11,7 @@ import time
 sys.path.insert(0, ".")
 import torch
 
-from torchinfra.nemotron_rerank import NemotronReranker
+from nemotron_serving.nemotron_rerank import NemotronReranker
 
 MODEL = os.environ.get("NEMO_MODEL", os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-FP8"))
 S = int(sys.argv[1]) if len(sys.argv) > 1 else 32768

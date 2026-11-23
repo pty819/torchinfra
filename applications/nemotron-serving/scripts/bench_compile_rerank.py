@@ -10,7 +10,7 @@ import time
 import torch
 
 sys.path.insert(0, ".")
-from torchinfra.jina_rerank import JinaReranker  # noqa: E402
+from nemotron_serving.jina_rerank import JinaReranker  # noqa: E402
 
 FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
 
