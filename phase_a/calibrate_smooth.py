@@ -1,11 +1,11 @@
 # SmoothQuant 校准: hook 每个语言塔 Linear 的输入, 统计 per-channel absmax
 # 输出: 每层 [K] fp32 向量 (safetensors)
+from paths import MODEL_DIR
 import json, time, sys, gc, torch
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 from transformers import AutoTokenizer
 from encoder import load_encoder, TPL
 
-OUT = "~/models/qwen21/int8_qwen3vl8b.calib.safetensors"
+OUT = str(MODEL_DIR / "int8_qwen3vl8b.calib.safetensors")
 
 # 校准集: 长短混合、中英混合、真实使用风格
 CAL_PROMPTS = [

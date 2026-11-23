@@ -2,17 +2,17 @@
 
 > **For agentic workers:** 用 subagent-driven-development 或 executing-plans 逐任务执行。步骤用 `- [ ]` 勾选。
 
-**Goal:** unsloth fp8 底 + Omni LoRA 在 82 上以 PyTorch 常驻进程出图，四组口径测距，产出 Gate 报告（≤86s/张？）
+**Goal:** unsloth fp8 底 + Omni LoRA 在测试机上以 PyTorch 常驻进程出图，四组口径测距，产出 Gate 报告（≤86s/张？）
 **Architecture:** 手搭 Qwen-2.1 DiT 前向（PEFT 兼容命名）+ rocBLAS `_scaled_mm` fp8 GEMM + torch SDPA 注意力 + 自移植 sdcpp sigma 公式；diffusers 仅作正确性参考
-**Tech Stack:** torch 2.14.0+rocm10.1（82:~/rocm10 venv, py3.14）、transformers(Qwen3-VL ✓)、safetensors、现有 gradio 前端
+**Tech Stack:** torch 2.14.0+rocm10.1（ROCm venv, py3.14）、transformers(Qwen3-VL ✓)、safetensors、现有 gradio 前端
 **Spec:** docs/specs/2026-11-19-qwen21dit-fp8-engine-design.md
 
 ## Global Constraints
-- 机器: 82 (RX 9070 GRE 12GB / Ryzen 9700X / 30GB RAM)，一切在 `~/项目/qwen21dit/` 进行
+- 机器: 测试机 (RX 9070 GRE 12GB / Ryzen 9700X / 30GB RAM)，一切在 `qwen21dit/` 进行
 - 权重: `~/models/qwen21/fp8/qwen21_fp8_e4m3fn.safetensors`(7.12GB) + `omni_lora_v0.1_bf16.safetensors`(0.67GB)（已下载中）
 - 采样对齐: sdcpp `src/runtime/denoiser.hpp:736-810` FluxScheduler（qwen2.1: base_shift=0.5, max_shift=0.9, max_seq=8192, shift_terminal=0.02）
 - 画质对拍基线: sdcpp 现网（Omni INT8 + alpacas@0.8, 🔞档）
-- 提交纪律: 每任务一 commit，git 在 ~/项目/qwen21dit
+- 提交纪律: 每任务一 commit，从仓库根目录运行 git
 
 ---
 
@@ -29,11 +29,13 @@ def inspect(path, out):
             t = f.get_slice(k)
             r["tensors"][k] = [list(t.get_shape()), str(t.get_dtype())]
     json.dump(r, open(out, "w"), indent=1)
-inspect("~/models/qwen21/fp8/qwen21_fp8_e4m3fn.safetensors", "phase_a/dit_report.json")
-inspect("~/models/qwen21/fp8/omni_lora_v0.1_bf16.safetensors", "phase_a/omni_report.json")
-inspect("~/models/qwen21/loras/nsfw_alpacas_v2.safetensors", "phase_a/alpacas_report.json")
+from paths import MODEL_DIR
+
+inspect(str(MODEL_DIR / "fp8/qwen21_fp8_e4m3fn.safetensors"), "phase_a/dit_report.json")
+inspect(str(MODEL_DIR / "fp8/omni_lora_v0.1_bf16.safetensors"), "phase_a/omni_report.json")
+inspect(str(MODEL_DIR / "loras/nsfw_alpacas_v2.safetensors"), "phase_a/alpacas_report.json")
 ```
-- [ ] 运行 `~/rocm10/bin/python phase_a/inspect_weights.py`（前提: /tmp/qdit_dl 标记 DL_DONE 存在，否则等下载）
+- [ ] 运行 `python phase_a/inspect_weights.py`（前提: /tmp/qdit_dl 标记 DL_DONE 存在，否则等下载）
 - [ ] 人工读三份 JSON，回答并记入 `phase_a/STRUCTURE.md`：①DiT 块数/hidden/头数（从 tensor 形状反推）②img_mlp 是 fused gate_up 还是 split（键名即答案）③fp8 dtype 是否带 scale 张量（无→需自标定）④Omni/alpacas LoRA 的键名约定与 rank
 - [ ] Commit: `feat(a): 权重勘察与结构档案`
 
@@ -74,7 +76,7 @@ def from_bf16(w_bf16):  # 离线标定
     s = (w_bf16.abs().amax() / 448.0).clamp(min=1e-12).float()
     return FP8Linear((w_bf16.float()/s).clamp(-448,448).to(torch.float8_e4m3fn), s)
 ```
-- [ ] 单测 `tests/test_fp8_linear.py::test_vs_bf16`: 随机 [4096,4096] 阵，FP8Linear vs bf16 matmul 相对误差 < 3%（GPU 跑，`~/rocm10/bin/python -m pytest`）
+- [ ] 单测 `tests/test_fp8_linear.py::test_vs_bf16`: 随机 [4096,4096] 阵，FP8Linear vs bf16 matmul 相对误差 < 3%（GPU 跑，`python -m pytest`）
 - [ ] 加载器分支：Task 1 ③ 若 checkpoint 无 scale → 载入时按 `from_bf16` 同式自标定（fp8→float→amax/448）
 - [ ] Commit: `feat(a): fp8 _scaled_mm 线性层`
 
@@ -126,7 +128,7 @@ def flux_sigmas(steps, seq_len):
 - [ ] Commit: `feat(a): 端到端与测距`
 
 ### Task 8: 常驻服务 + gradio 接入
-**Files:** Create `phase_a/serve.py`；Modify 82 `~/build/qwen21/web/app.py`（加"引擎"单选: sdcpp/qdit）
+**Files:** Create `phase_a/serve.py`；Modify Gradio app（加"引擎"单选: sdcpp/qdit）
 - [ ] serve.py: 起进程加载权重常驻，stdin/本地 socket 收 JSON(prompt, w, h, steps, cfg, sampler, seed, loras) → 出 PNG 路径；队列 1 并发
 - [ ] app.py: 引擎= qdit 时 subprocess 调 serve（沿用现有 gr.Progress 流程，`bash -c source rocm-env` 不再需要）
 - [ ] 网页实测一张 1344² 🔞，与 sdcpp 同参数出图对比

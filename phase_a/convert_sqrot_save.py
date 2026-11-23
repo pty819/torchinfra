@@ -1,12 +1,12 @@
 # 全模型两级旋转 W8A8 验证 (无 smooth, 纯旋转 + per-token 动态量化)
+from paths import MODEL_DIR
 import json, time, sys, gc, torch
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 import torch.nn as nn
 from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 from safetensors.torch import safe_open
 from encoder import load_encoder, TPL
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
 PROMPTS = ["masterpiece, a serene mountain lake at dawn, mist over water, ultra detailed",
            "1girl, cute anime style, cherry blossoms, golden hour lighting, ultra detailed",
            " masterpiece, best quality, 1girl, seductive pose, dim lighting, detailed skin"]
@@ -38,7 +38,7 @@ R256 = torch.diag(torch.randn(256).sign()) @ (_h / 16.0)
 
 from safetensors.torch import safe_open as _so
 _HQ = {}
-with _so("~/models/qwen21/int8_qwen3vl8b.rotlearn.safetensors", framework="pt") as _f:
+with _so(str(MODEL_DIR / "int8_qwen3vl8b.rotlearn.safetensors"), framework="pt") as _f:
     for _k in _f.keys():
         _HQ[_k[:-3]] = _f.get_tensor(_k).float()
 
@@ -46,7 +46,7 @@ import os as _os
 ALPHA = float(_os.environ.get("SQ_ALPHA", "0.5"))
 _CAL = {}
 from safetensors.torch import safe_open as _so2
-with _so2("~/models/qwen21/int8_qwen3vl8b.calib.safetensors", framework="pt") as _f:
+with _so2(str(MODEL_DIR / "int8_qwen3vl8b.calib.safetensors"), framework="pt") as _f:
     for _k in _f.keys():
         _CAL[_k] = _f.get_tensor(_k)
 
@@ -181,6 +181,6 @@ out = {}
 for n, d in OUTQ.items():
     for k, v in d.items():
         out[n + "." + k] = v
-_sf(out, "~/models/qwen21/int8_qwen3vl8b_sqrot.safetensors")
+_sf(out, str(MODEL_DIR / "int8_qwen3vl8b_sqrot.safetensors"))
 print("SAVED", len(out))
 print("RHT_DIAG_DONE")

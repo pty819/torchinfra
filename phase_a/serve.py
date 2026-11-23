@@ -3,7 +3,7 @@
 """qdit 常驻推理 worker: 模型驻留内存显存 + 编译缓存, HTTP API 供 gradio 调用
 端点: POST /load {warmup_prompts:[..]}  POST /unload  GET /state
       POST /generate {prompt,neg,seed,steps,cfg,size,sampler}  GET /job/{id}
-用法: ~/rocm10/bin/python serve.py [port]   (默认 7861, 仅 127.0.0.1)"""
+用法: python phase_a/serve.py [port]   (默认 7861, 仅 127.0.0.1)"""
 import json, os, sys, time, threading, datetime, gc, traceback
 from collections import deque
 from uuid import uuid4
@@ -11,14 +11,14 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "2")
+from paths import MODEL_DIR, OUTDIR
 import torch._dynamo as _dyn
 _dyn.config.cache_size_limit = 128            # 跨提示词长度的编译图全留进程内
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7861
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W   = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
-OUTDIR  = "~/Pictures/qwen"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
+VAE_CFG = str(MODEL_DIR / "fp8/vae21_config.json")
+VAE_W   = str(MODEL_DIR / "qwen_image_2.1_vae_diffusers.safetensors")
 TPL = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 SYS_TXT = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 

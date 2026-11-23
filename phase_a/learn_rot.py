@@ -1,13 +1,13 @@
 # 迷你 SpinQuant: 逐层学习组间旋转 Hq (Cayley 正交 + 完整 W8A8 量化 MSE + STE), GPU
+from paths import MODEL_DIR
 import sys, json, time, gc, torch
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 import torch.nn as nn
 from safetensors.torch import safe_open, save_file
 from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
-XS = "~/models/qwen21/int8_qwen3vl8b.xsamples.safetensors"
-OUT = "~/models/qwen21/int8_qwen3vl8b.rotlearn.safetensors"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
+XS = str(MODEL_DIR / "int8_qwen3vl8b.xsamples.safetensors")
+OUT = str(MODEL_DIR / "int8_qwen3vl8b.rotlearn.safetensors")
 N0, SEED = 256, 20261122
 STEPS, LR = 120, 3e-3
 torch.manual_seed(SEED)

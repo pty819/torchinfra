@@ -3,6 +3,7 @@
 """qdit 首张真图: Qwen3-VL(CPU,fp8权重) 编码 → DiT fp8(GPU) 采样 → VAE(GPU) 解码
 条件配方照抄 diffusers QwenImage21Pipeline: 模板/丢system token/pre-norm hidden/负向词" "
 """
+from paths import MODEL_DIR, OUTDIR
 import sys, time, torch
 import torch.nn.functional as F
 
@@ -18,7 +19,7 @@ STEPS = 20
 t0 = time.time()
 import json
 from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLForConditionalGeneration
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
 tok = AutoTokenizer.from_pretrained(ENC_DIR)
 # rocm10 环境无 compressed-tensors/torchao → meta 骨架 + 手动反量化 (F8 .weight × .weight_scale → bf16)
 _cfg = json.load(open(f"{ENC_DIR}/config.json")); _cfg.pop("quantization_config", None)
@@ -112,12 +113,12 @@ del model, model_fn; import gc; gc.collect(); torch.cuda.empty_cache()  # 给 VA
 t0 = time.time()
 import json
 from diffusers.models import AutoencoderKLQwenImage21
-cfgd = json.load(open("~/models/qwen21/fp8/vae21_config.json"))
+cfgd = json.load(open(str(MODEL_DIR / "fp8/vae21_config.json")))
 cfgd.pop("_class_name", None); cfgd.pop("_diffusers_version", None)
 vae = AutoencoderKLQwenImage21(**cfgd).to(DEV, torch.bfloat16).eval()
 vae.enable_tiling()  # 默认 tile256/stride192: 解码10s, 换回速度(淡竖纹回归)
 from safetensors.torch import load_file
-raw = load_file("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
+raw = load_file(str(MODEL_DIR / "qwen_image_2.1_vae_diffusers.safetensors"))
 sd = vae.state_dict()
 remap = {}
 model_keys = set(sd.keys())
@@ -141,6 +142,7 @@ with torch.no_grad():
 img = ((img.float() / 2 + 0.5).clamp(0, 1) * 255).byte()[0].cpu()
 from PIL import Image
 import datetime
-out = f"~/Pictures/qwen/qwen_{datetime.datetime.now():%m%d_%H%M%S}_qdit-{SAMPLER}_s{SEED}.png"
+OUTDIR.mkdir(parents=True, exist_ok=True)
+out = f"{OUTDIR}/qwen_{datetime.datetime.now():%m%d_%H%M%S}_qdit-{SAMPLER}_s{SEED}.png"
 Image.fromarray(img.permute(1, 2, 0).numpy()).save(out)
 print(f"[{time.time()-t0:.0f}s] 已存 {out}")

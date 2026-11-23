@@ -1,13 +1,13 @@
 # SmoothQuant 转换 + W8A8 (reduce_range=False, VNNI) 验证, 扫 α
+from paths import MODEL_DIR
 import json, time, sys, gc, torch, os
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 import torch.nn as nn
 from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 from safetensors.torch import safe_open, save_file
 from encoder import load_encoder, TPL
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
-CAL = "~/models/qwen21/int8_qwen3vl8b.calib.safetensors"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
+CAL = str(MODEL_DIR / "int8_qwen3vl8b.calib.safetensors")
 PROMPTS = ["masterpiece, a serene mountain lake at dawn, mist over water, ultra detailed",
            "1girl, cute anime style, cherry blossoms, golden hour lighting, ultra detailed",
            " masterpiece, best quality, 1girl, seductive pose, dim lighting, detailed skin"]

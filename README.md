@@ -1,9 +1,9 @@
 # qwen21dit
 
 Qwen-Image-2.1 的手写 PyTorch 推理引擎 + 自研 ROCm/RDNA4 算子，运行于
-AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。不依赖 diffusers，
-直接加载 fp8 权重，采样路径为自研 fp8 注意力内核 + hipBLASLt GEMM，
-文本编码器为纯 W8A8 int8（VNNI）。
+AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。DiT 直接加载 fp8 权重，
+采样路径为自研 fp8 注意力内核 + hipBLASLt GEMM，VAE 使用 Diffusers 实现，
+文本编码器的线性层为 W8A8 int8（VNNI）。
 
 ## 现状（2026-11-23）
 
@@ -21,10 +21,38 @@ AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。不依赖 diffusers，
 ## 用法
 
 ```bash
-QDIT_ENC=sqrot2 ~/rocm10/bin/python phase_a/serve.py  # 默认: W8A8 蝶形合并版
+QDIT_ENC=sqrot2 python phase_a/serve.py  # 默认: W8A8 蝶形合并版
 # QDIT_ENC=sqrot 退回 GPU 旋转版 (长 prompt b≥500 时编码更快)
 python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 ```
+
+`QDIT_MODEL_DIR` 指定权重根目录（默认 `~/models/qwen21`）；`QDIT_OUTDIR` 指定出图目录
+（默认 `~/Pictures/qwen`，worker 和网页应设为同一个目录）。自研 FP8 注意力需要 `torchinfra`，
+默认从本仓库的同级目录查找，也可用 `QDIT_TORCHINFRA_DIR` 指定。
+
+### 适配的权重
+
+下表的本地文件名均相对于 `QDIT_MODEL_DIR`。仓库不附带模型权重。
+
+| 组件 | Hugging Face 仓库 / 文件 | 本地文件名 |
+| --- | --- | --- |
+| DiT · FP8 E4M3FN | [unsloth/Qwen-Image-2.1-FP8](https://huggingface.co/unsloth/Qwen-Image-2.1-FP8/blob/main/Qwen-Image-2.1-FP8.safetensors) · `Qwen-Image-2.1-FP8.safetensors` | `fp8/qwen21_fp8_e4m3fn.safetensors` |
+| VAE · Diffusers 权重 | [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/vae/diffusion_pytorch_model.safetensors) · `vae/diffusion_pytorch_model.safetensors` | `qwen_image_2.1_vae_diffusers.safetensors` |
+| VAE · 配置 | [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/vae/config.json) · `vae/config.json` | `fp8/vae21_config.json` |
+| 文本编码器 · Qwen3-VL-8B-Instruct FP8 | 上游模型参考：[Qwen/Qwen3-VL-8B-Instruct-FP8](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8)（两片 `model-*.safetensors`，另有模型配置和 tokenizer） | 离线工具使用 `fp8/qwen3vl8b_fp8/` 的单文件 `model.safetensors`、配置和 tokenizer；不是直接读取上游两片 |
+| 文本编码器 · 运行时 W8A8 | **不是 Hugging Face 下载文件**。由项目离线校准和转换生成 | `int8_qwen3vl8b_sqrot2.safetensors` + `int8_qwen3vl8b_sq.safetensors`（补齐归一化等未量化张量），另需上述配置和 tokenizer |
+
+DiT 和 VAE 的文件与上游 SHA-256 一致。测试用的编码器是本地单文件包，未确认它对应
+Hugging Face 上的哪一个确切 revision；不能把上游分片直接改名替代，也不要用 Unsloth 的
+ComfyUI 单文件 `Qwen-Image-2.1-text_encoder-FP8.safetensors` 替代这一输入格式。
+
+默认还加载三份独立 LoRA，均放在 `loras/` 下：
+
+- `nsfw_alpacas_v2.safetensors`：与 [Sentinel7/qwen-image-2.1 的 Alpacas V2](https://huggingface.co/Sentinel7/qwen-image-2.1/blob/main/2958918/3357315/NSFW%20Qwen%20by%20TheseAlpacas%20V2.safetensors) 文件哈希一致。
+- `nsfw_genitalia_fix.safetensors`：与 [perpetual3x 的 `Genitalia-Anatomy-2.1-v1.safetensors`](https://huggingface.co/perpetual3x/Qwen-Image-Genitalia-Anatomy-Fix-NSFW-LoRA-v1/blob/main/Genitalia-Anatomy-2.1-v1.safetensors) 文件哈希一致。
+- `nsfw_vaginus_v13b.safetensors`：测试使用本地 V1.3b 文件，未核验到对应的 Hugging Face 文件。
+
+如不使用这组 LoRA，启动 worker 时设置 `QDIT_LORA=0`。实验用的 Omni 权重不是上表中的生产 DiT。
 
 ### 网页面板：卸载与刷新重连
 
@@ -148,7 +176,7 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 
 ### 环境坑记录
 
-- 82 的 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments` 会直接 GPU core dump
+- 测试机的 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments` 会直接 GPU core dump
 - serve.py `busy=true` 是 queue 缺 task_done 的误报（显示问题）
 - 新 prompt 长度触发 dynamo 重编译时 enc_s 首图会显示 ~10s（正常 0.5s）
 

@@ -9,8 +9,7 @@ import gradio as gr
 import urllib.request as _ur
 from urllib.error import HTTPError
 
-HOME = os.path.expanduser("~")
-OUTDIR = f"{HOME}/Pictures/qwen"
+OUTDIR = os.path.expanduser(os.environ.get("QDIT_OUTDIR", "~/Pictures/qwen"))
 QDIT = "http://127.0.0.1:7861"
 STEPS, CFG, SIZE, SAMPLER = 20, 4.0, 1344, "er_sde"
 ACTIVE = "/tmp/qdit_web_active.json"   # 活任务登记: 页面刷新/换设备后自动重连
@@ -70,7 +69,7 @@ def qdit_state():
 def status_text():
     st = qdit_state()
     if st.get("down"):
-        return "⚪ qdit worker 未运行（82: `cd ~/项目/qwen21dit/phase_a && ~/rocm10/bin/python serve.py`）"
+        return "⚪ qdit worker 未运行（运行 `python phase_a/serve.py`）"
     if st.get("busy"):
         phase = {"load": "加载 / 编译预热", "generate": "生成中", "unload": "卸载中",
                  "selftest": "自检中", "queued": "任务排队中"}
@@ -206,7 +205,7 @@ with gr.Blocks(title="Qwen Draw · qdit") as demo:
         unload_btn = gr.Button("🔻 卸载（释放内存和显存）", variant="stop")
     image = gr.Image(label="结果", type="filepath", height=520)
     info = gr.Markdown()
-    with gr.Accordion("📁 历史画廊（~/Pictures/qwen）", open=True):
+    with gr.Accordion("📁 历史画廊", open=True):
         g = gr.Gallery(columns=6, height=320)
         rf = gr.Button("🔄 刷新历史")
 

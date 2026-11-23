@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """encoder CPU 前向速度: MODE=eager|autocast|compile|compile-autocast (原生 compressed-tensors 加载)"""
+from paths import MODEL_DIR
 import sys, time, torch
 from transformers import AutoTokenizer, Qwen3VLForConditionalGeneration
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "eager"
-ENC = "~/models/qwen21/fp8/qwen3vl8b_fp8"
+ENC = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
 TPL = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
 t0 = time.time()

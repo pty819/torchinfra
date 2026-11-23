@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Qwen3-VL-8B 编码器 CPU 加载与编码 (fp8 权重手动反量化, 零额外依赖)
 配方照抄 diffusers QwenImage21Pipeline: 模板 / 丢 system token / pre-norm hidden"""
+from paths import MODEL_DIR
 import json, torch
 from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
 TPL = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 SYS_TXT = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 
@@ -54,7 +55,7 @@ def encode_raw(enc, tok, text, use_autocast=False, runner=None):
     return out.hidden_states[-1][0].float(), ids.shape[1]
 
 
-SQ_FILE = "~/models/qwen21/int8_qwen3vl8b_sq.safetensors"
+SQ_FILE = str(MODEL_DIR / "int8_qwen3vl8b_sq.safetensors")
 
 def load_encoder_sq():
     """W8A8 SmoothQuant(alpha=0.75 离线校准) encoder: int8 权重常驻 + VNNI int8 算力。
@@ -124,7 +125,7 @@ def load_encoder_sq():
     return tok, enc, enc.model.language_model, drop
 
 
-SQROT = "~/models/qwen21/int8_qwen3vl8b_sqrot.safetensors"
+SQROT = str(MODEL_DIR / "int8_qwen3vl8b_sqrot.safetensors")
 _ROT_SEED = 20261122
 _N0 = 256
 
@@ -220,7 +221,7 @@ def load_encoder_sqrot():
 
 # ---------------- sqrot2: 全蝶形 CPU 旋转 (方案1) + qkv/gateup 组入口合并 (方案2) ----------------
 # 组内 B4^⊗4 蝶形 + 组间 B4^⊗2 / O3⊗B4^⊗2 蝶形, 无小 matmul; 旋转 252 -> 144 次, 纯 CPU 无 PCIe
-SQROT2 = "~/models/qwen21/int8_qwen3vl8b_sqrot2.safetensors"
+SQROT2 = str(MODEL_DIR / "int8_qwen3vl8b_sqrot2.safetensors")
 _B4 = torch.tensor([[1.,1.,1.,-1.],[1.,1.,-1.,1.],[1.,-1.,1.,1.],[-1.,1.,1.,1.]])
 _O3r = torch.tensor([[1.,1.,1.],[2.,-1.,-1.],[0.,1.,-1.]])
 _O3 = (_O3r / _O3r.norm(dim=1, keepdim=True)).float()

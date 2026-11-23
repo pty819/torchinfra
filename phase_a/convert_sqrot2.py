@@ -1,14 +1,14 @@
 # sqrot2: 组间蝶形矩阵 (B4^⊗2 / O3⊗B4^⊗2) + qkv/gateup 组共享 smooth s, 在线全蝶形 W8A8
 # cos 达标 (>=0.9975) 才落盘 int8_qwen3vl8b_sqrot2.safetensors
+from paths import MODEL_DIR
 import json, time, sys, gc, os, torch
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 import torch.nn as nn
 from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 from safetensors.torch import safe_open, save_file
 from encoder import load_encoder, TPL
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
-OUT = "~/models/qwen21/int8_qwen3vl8b_sqrot2.safetensors"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
+OUT = str(MODEL_DIR / "int8_qwen3vl8b_sqrot2.safetensors")
 PROMPTS = ["masterpiece, a serene mountain lake at dawn, mist over water, ultra detailed",
            "1girl, cute anime style, cherry blossoms, golden hour lighting, ultra detailed",
            " masterpiece, best quality, 1girl, seductive pose, dim lighting, detailed skin"]
@@ -89,7 +89,7 @@ def rot_w(W, ssm, K):                      # 离线权重: matmul 形式 (与在
     return (a.reshape(-1, N0) @ R_INTRA).reshape(W.shape)
 
 _CAL = {}
-with safe_open("~/models/qwen21/int8_qwen3vl8b.calib.safetensors", framework="pt") as f:
+with safe_open(str(MODEL_DIR / "int8_qwen3vl8b.calib.safetensors"), framework="pt") as f:
     for k in f.keys():
         _CAL[k] = f.get_tensor(k)
 

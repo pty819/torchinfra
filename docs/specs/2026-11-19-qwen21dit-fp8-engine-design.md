@@ -18,7 +18,7 @@
 ## 3. 路线 C：两阶段 + 数据闸门
 
 ### Phase A — PyTorch fp8 直跑（先做，工作量: 天级）
-- 环境: torchinfra 的 ~/rocm10 venv（rocBLAS _scaled_mm fp8 实测 107~158 TF）
+- 环境: torchinfra 的 ROCm 虚拟环境 venv（rocBLAS _scaled_mm fp8 实测 107~158 TF）
 - 前向: 优先 diffusers 原生 QwenImage21 pipeline（M0 第一项: 验证 diffusers 支持度与 fp8 加载路径）；不通则手搭 DiT module 直读 unsloth safetensors
 - 结构: 权重常驻（进程不退出，杀掉冷启动 25s）+ 采样循环 + CFG 双前向批 + prompt→embedding 缓存
 - 测距口径: 同 sdcpp 完全一致的四组（1344²/1024² × 20步/4步），rocprof 分桶（GEMM/attn/胶水）
@@ -34,10 +34,10 @@
 - 胶水: Triton 融合（RMSNorm+残差 / AdaLN / mRoPE）
 - 移植核心资产: P×448 寄存器量化自洽、零同步 descale、真实S/paddedS 分离（头几何重写）
 
-## 4. 目录（82）
+## 4. 目录（示例）
 
 ```
-~/项目/qwen21dit/
+qwen21dit/
 ├─ docs/specs/          # 本文档
 ├─ phase_a/             # PyTorch fp8 直跑（M0 测距 + 常驻管线）
 │   ├─ dit_forward.py   # diffusers 或手搭

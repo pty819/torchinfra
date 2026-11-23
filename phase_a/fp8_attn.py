@@ -3,6 +3,7 @@
 - tensorwise 量化 q/k/v → 双 wmma_f32_16x16x16_fp8_fp8 → bf16 输出 [B,S,H*D]
 - torch.library.custom_op 包装: dynamo 可追踪, compile 不图断裂
 - 开关: 环境变量 QDIT_FP8_ATTN=1"""
+from paths import TORCHINFRA_DIR
 import os, math, torch
 import torch.nn.functional as F
 
@@ -13,7 +14,7 @@ def _get_exe(H=32, D=128):
     global _EXE
     if _EXE is None:
         import sys
-        sys.path.insert(0, "~/torchinfra")
+        sys.path.insert(0, str(TORCHINFRA_DIR))
         from flydsl_kernels.flash_attn_fp8_gfx1201 import build_flash_attn_fp8_module
         _EXE = build_flash_attn_fp8_module(num_heads=H, head_dim=D, num_kv_heads=H,
                                            causal=False, waves_per_eu=1,

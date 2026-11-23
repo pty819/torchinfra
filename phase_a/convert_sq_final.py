@@ -1,11 +1,12 @@
 # 定版转换: SmoothQuant α=0.75 W8A8 权重落盘 (int8 + scale + sinv + bf16 层)
+from paths import MODEL_DIR
 import json, torch, os
 from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 from safetensors.torch import safe_open, save_file
 
-ENC_DIR = "~/models/qwen21/fp8/qwen3vl8b_fp8"
-CAL = "~/models/qwen21/int8_qwen3vl8b.calib.safetensors"
-OUT = "~/models/qwen21/int8_qwen3vl8b_sq.safetensors"
+ENC_DIR = str(MODEL_DIR / "fp8/qwen3vl8b_fp8")
+CAL = str(MODEL_DIR / "int8_qwen3vl8b.calib.safetensors")
+OUT = str(MODEL_DIR / "int8_qwen3vl8b_sq.safetensors")
 ALPHA = 0.75
 
 cfg = json.load(open(f"{ENC_DIR}/config.json")); cfg.pop("quantization_config", None)

@@ -1,6 +1,6 @@
 # SpinQuant 迷你版第一步: 收集每层 Linear 的输入样本 (每层 96 行随机采样)
+from paths import MODEL_DIR
 import sys, gc, torch
-sys.path.insert(0, "~/项目/qwen21dit/phase_a")
 import torch.nn as nn
 from transformers import AutoTokenizer
 from encoder import load_encoder, TPL
@@ -32,7 +32,7 @@ CAL_PROMPTS = ["masterpiece, a serene mountain lake at dawn, mist over water, ul
     "brutal close-up of a tarantula face, macro photography"]
 from safetensors.torch import save_file
 
-OUT = "~/models/qwen21/int8_qwen3vl8b.xsamples.safetensors"
+OUT = str(MODEL_DIR / "int8_qwen3vl8b.xsamples.safetensors")
 NSAMP = 96
 TOPK = 48   # absmax 最大的行(massive 点)必进样本
 
