@@ -56,7 +56,7 @@ def do_load(warmup_prompts):
         S.drop = S.tok(SYS_TXT, return_tensors="pt")["input_ids"].shape[1]
     from loader import load_fp8
     S.model = load_fp8(device="cuda", mode="fp8")
-    S.model_c = torch.compile(S.model)
+    S.model_c = torch.compile(S.model, dynamic=True)
     cfgd = json.load(open(VAE_CFG))
     for k in ("_class_name", "_diffusers_version"): cfgd.pop(k, None)
     from diffusers.models import AutoencoderKLQwenImage21
@@ -116,6 +116,8 @@ def do_generate(jid, req):
     Hl = Wl = H // 16
     sig = flux_sigmas(steps, Hl * Wl).tolist()
     def model_fn(x, c, t, pe, prefix, **kw):
+        if pe is None:   # rope 在编译区外构建 (dict 缓存+LT 偏移会特化)
+            pe = S.model._pe(c.shape[1], x.shape[2], x.shape[3], x.device)
         return S.model_c(x, c, t, pe, prefix)
     cb = lambda i, n: S.jobs[jid].update(step=i + 1, total=n)
     t1 = time.time()

@@ -177,7 +177,8 @@ class QwenDiT(nn.Module):
     def forward(self, x_latent, ctx, timestep, pe, prefix_len):
         """x_latent: [B,64,Hl,Wl]; ctx: [B,Lt,4096]; timestep: [B] 0..1000; pe: rope 表 (文本段+图像段拼接顺序)"""
         B = x_latent.shape[0]
-        if pe is None:  # 采样器未传则按形状缓存构建
+        prefix_len = ctx.shape[1]   # 动态编译: 入参 int 按值特化会致每个新长度重编译, 从 shape 推导
+        if pe is None:  # 采样器未传则按形状缓存构建 (serve 动态路径由 model_fn 外部构建后传入)
             pe = self._pe(ctx.shape[1], x_latent.shape[2], x_latent.shape[3], x_latent.device)
         t = torch.stack([timestep, torch.zeros_like(timestep)], 1)          # [B,2]
         h = timestep_embedding(t.reshape(-1)).to(self.t_embed_1.weight.dtype)  # [2B,256]

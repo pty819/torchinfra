@@ -82,8 +82,8 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 - **"采样 2.06× 回归"系误报（2026-11-23 查明，非回归）**：逐新 prompt 测得
   149.7s 的真因是 **ctx 长度 LT 变化触发整图 dynamo 重编译（+29~70s/新长度）**，
   热路径实测 76.5s 与历史 72.8s 一致；fp8 GEMM 210TF/attention 266ms/裸 GEMM
-  98TF 全部健康。已知架构税：torch.compile 静态分形状，每个新 LT 首图慢
-  ~30-70s——可做 LT 分桶（pad 到 16 倍数）或 dynamic compile 消除
+  98TF 全部健康。该架构税（每个新 LT 首图慢 ~30-70s）已由"有效的"第 7 条
+  dynamic 编译消除
 
 ### 环境坑记录
 
