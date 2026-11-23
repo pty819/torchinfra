@@ -1,5 +1,4 @@
 import sys, math
-sys.path.insert(0, "~/torchinfra")
 import torch, torch.nn.functional as F
 from flydsl_kernels.fp8_wrapper import quantize_tensorwise
 from flydsl_kernels.flash_attn_fp8_gfx1201 import build_flash_attn_fp8_module

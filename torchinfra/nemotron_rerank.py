@@ -704,7 +704,7 @@ class NemotronReranker:
         """单 query 对多文档逐对打分（pointwise），返回按 logit 降序。
 
         逐条 B=1 前向（小 S 吃 CUDA graph）；并发/拼批路径用
-        rerank_server.NemotronScheduler。"""
+        nemotron_serving.server.NemotronScheduler。"""
         scores = []
         for d in documents:
             ids = torch.tensor([self.encode_pair_ids(query, d)], device="cuda")

@@ -1,6 +1,5 @@
 # 极小对照：for + yield 携带 acc，循环内变地址全局加载。acc 应 = rounds。
 import sys, os
-sys.path.insert(0, "~/torchinfra")
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, gpu

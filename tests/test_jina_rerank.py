@@ -1,10 +1,11 @@
+import os
 """jina-reranker-v3.5：自研前向与官方 HF forward 的分数对拍。"""
 import torch
 from transformers import AutoModel
 
 from torchinfra.jina_rerank import JinaReranker, _format_prompt
 
-PATH = "~/models/jina-reranker-v3.5"
+PATH = os.path.expanduser("~/models/jina-reranker-v3.5")
 
 
 def main():

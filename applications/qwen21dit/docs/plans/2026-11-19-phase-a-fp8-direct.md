@@ -17,7 +17,7 @@
 ---
 
 ### Task 1: 权重勘察 → weights_report.json
-**Files:** Create `phase_a/inspect_weights.py`, 产物 `phase_a/weights_report.json`
+**Files:** Create `scripts/inspect_weights.py`, 产物 `reports/weights_report.json`
 - [ ] 写脚本（完整可用）:
 ```python
 import json, torch
@@ -31,22 +31,22 @@ def inspect(path, out):
     json.dump(r, open(out, "w"), indent=1)
 from paths import MODEL_DIR
 
-inspect(str(MODEL_DIR / "fp8/qwen21_fp8_e4m3fn.safetensors"), "phase_a/dit_report.json")
-inspect(str(MODEL_DIR / "fp8/omni_lora_v0.1_bf16.safetensors"), "phase_a/omni_report.json")
-inspect(str(MODEL_DIR / "loras/nsfw_alpacas_v2.safetensors"), "phase_a/alpacas_report.json")
+inspect(str(MODEL_DIR / "fp8/qwen21_fp8_e4m3fn.safetensors"), "reports/dit_report.json")
+inspect(str(MODEL_DIR / "fp8/omni_lora_v0.1_bf16.safetensors"), "reports/omni_report.json")
+inspect(str(MODEL_DIR / "loras/nsfw_alpacas_v2.safetensors"), "reports/alpacas_report.json")
 ```
-- [ ] 运行 `python phase_a/inspect_weights.py`（前提: /tmp/qdit_dl 标记 DL_DONE 存在，否则等下载）
-- [ ] 人工读三份 JSON，回答并记入 `phase_a/STRUCTURE.md`：①DiT 块数/hidden/头数（从 tensor 形状反推）②img_mlp 是 fused gate_up 还是 split（键名即答案）③fp8 dtype 是否带 scale 张量（无→需自标定）④Omni/alpacas LoRA 的键名约定与 rank
+- [ ] 运行 `python scripts/inspect_weights.py`（前提: /tmp/qdit_dl 标记 DL_DONE 存在，否则等下载）
+- [ ] 人工读三份 JSON，回答并记入 `docs/phase-a-structure.md`：①DiT 块数/hidden/头数（从 tensor 形状反推）②img_mlp 是 fused gate_up 还是 split（键名即答案）③fp8 dtype 是否带 scale 张量（无→需自标定）④Omni/alpacas LoRA 的键名约定与 rank
 - [ ] Commit: `feat(a): 权重勘察与结构档案`
 
 ### Task 2: diffusers 支持度裁决
-**Files:** Create `phase_a/probe_diffusers.py`，结论追加到 `phase_a/STRUCTURE.md`
+**Files:** Create `scripts/probe_diffusers.py`，结论追加到 `docs/phase-a-structure.md`
 - [ ] 脚本: `import diffusers; from diffusers import QwenImage21Pipeline`（下载装完后）; 若 ImportError 则尝试 `pip index` 查最新版本号并记录
 - [ ] 判据（写死）: 能 import 且官方 `Qwen/Qwen-Image-2.1` diffusers 目录结构存在 → diffusers 路记为「参考实现」（用来对拍 forward 数学，不当运行时）；否则直接用 sdcpp 源码 + checkpoint 反推
 - [ ] Commit（与 Task 1 可合并）
 
 ### Task 3: DiT 前向（PEFT 兼容命名）
-**Files:** Create `phase_a/dit_forward.py`（本任务只搭 bf16 骨架+正确性，fp8 在 Task 4）
+**Files:** Create `src/qwen21dit/dit_forward.py`（本任务只搭 bf16 骨架+正确性，fp8 在 Task 4）
 **Interfaces:** Produces `class QwenDiT(nn.Module)`，`forward(hidden, cond_vec, timesteps, rope) -> eps`；模块命名与 alpacas/omni LoRA 键名逐字一致（Task 1 ④ 的结论为准）
 - [ ] 按 STRUCTURE.md 的块结构写 `__init__`：每块 = RMSNorm → img_attn(qkv+o) / txt_attn(若分离) → RMSNorm → img_mlp(gate_up+proj) + txt_mlp + AdaLN 调制（timestep-MLP 出 6/12 个调制系数乘加）
 - [ ] 注意力 v0 用 `torch.nn.functional.scaled_dot_product_attention`（双向无 mask，text+img 拼接序列），RoPE 用 qwen mrope 的 3 频段实现（参考 diffusers QwenImage2TVModel 或 sdcpp 源 `model/qwen_image*.cpp` 的 rope 表）
@@ -54,7 +54,7 @@ inspect(str(MODEL_DIR / "loras/nsfw_alpacas_v2.safetensors"), "phase_a/alpacas_r
 - [ ] Commit: `feat(a): DiT bf16 前向骨架`
 
 ### Task 4: fp8 GEMM 层
-**Files:** Modify `phase_a/dit_forward.py`（linear 替换）；Create `phase_a/fp8_linear.py`
+**Files:** Modify `src/qwen21dit/dit_forward.py`（linear 替换）；Create `src/qwen21dit/fp8_linear.py`
 - [ ] `fp8_linear.py`（完整）:
 ```python
 import torch
@@ -81,7 +81,7 @@ def from_bf16(w_bf16):  # 离线标定
 - [ ] Commit: `feat(a): fp8 _scaled_mm 线性层`
 
 ### Task 5: LoRA 叠加器
-**Files:** Create `phase_a/lora.py`
+**Files:** Create `src/qwen21dit/lora.py`
 - [ ] 完整实现: 读 PEFT safetensors → `{module_name: (A[B float16], alpha)}`；`apply_all(dit, strength_map)`: 对每个命中模块包 `LoRAWrapper(base, A, B, s*alpha/r)`
 ```python
 class LoRAWrapper(torch.nn.Module):
@@ -97,7 +97,7 @@ class LoRAWrapper(torch.nn.Module):
 - [ ] Commit: `feat(a): PEFT LoRA 运行时叠加`
 
 ### Task 6: sigma 与采样循环
-**Files:** Create `phase_a/sigmas.py`（移植 sdcpp 公式）+ `phase_a/sample.py`
+**Files:** Create `src/qwen21dit/sigmas.py`（移植 sdcpp 公式）+ `src/qwen21dit/sample.py`
 - [ ] `sigmas.py`（完整，qwen2.1 常量写死）:
 ```python
 import math, torch
@@ -121,14 +121,14 @@ def flux_sigmas(steps, seq_len):
 - [ ] Commit: `feat(a): 采样循环与 sigma 对齐`
 
 ### Task 7: 端到端冒烟 + 四组测距
-**Files:** Create `phase_a/bench.py`；产物 `phase_a/BENCH.md`
-- [ ] 冒烟: 512² "a lovely cat holding a sign says 'fp8'"，出图存 `phase_a/out/smoke.png`，断言非全黑/非 NaN（像素 std > 0.05）
+**Files:** Create `scripts/bench.py`；产物 `reports/BENCH.md`
+- [ ] 冒烟: 512² "a lovely cat holding a sign says 'fp8'"，出图存 `reports/smoke.png`，断言非全黑/非 NaN（像素 std > 0.05）
 - [ ] 四组: {1024², 1344²} × {Viggle 6步(CFG1), 🔞 20步(CFG4)}，各记 cold/warm、torch.cuda.synchronize 计时 + rocprof 分桶（GEMM/SDPA/other 三桶 kernel 时间）
 - [ ] BENCH.md 表格 vs sdcpp 基线（111.6s@1344²/20步；Viggle 41s 采样@1344²）
 - [ ] Commit: `feat(a): 端到端与测距`
 
 ### Task 8: 常驻服务 + gradio 接入
-**Files:** Create `phase_a/serve.py`；Modify Gradio app（加"引擎"单选: sdcpp/qdit）
+**Files:** Create `src/qwen21dit/serve.py`；Modify Gradio app（加"引擎"单选: sdcpp/qdit）
 - [ ] serve.py: 起进程加载权重常驻，stdin/本地 socket 收 JSON(prompt, w, h, steps, cfg, sampler, seed, loras) → 出 PNG 路径；队列 1 并发
 - [ ] app.py: 引擎= qdit 时 subprocess 调 serve（沿用现有 gr.Progress 流程，`bash -c source rocm-env` 不再需要）
 - [ ] 网页实测一张 1344² 🔞，与 sdcpp 同参数出图对比

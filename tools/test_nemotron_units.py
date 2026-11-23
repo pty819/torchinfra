@@ -1,3 +1,4 @@
+import os
 """nemotron 移植的三个独立单元验证（不加载模型权重）：
 A. yarn inv_freq vs transformers 原函数逐位对比
 B. rope kernel vs torch 参考（含 llama4 Q-scale 两档）
@@ -18,7 +19,7 @@ def test_yarn():
     from transformers.models.ministral3 import Ministral3Config
     from transformers.modeling_rope_utils import _compute_yarn_parameters
     cfg = Ministral3Config(**json.load(
-        open("~/models/Nemotron-3.5-Rerank-8B-FP8/config.json")
+        open(os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-FP8/config.json"))
     )["text_config"])
     ref_inv, ref_factor = _compute_yarn_parameters(cfg, device="cpu")
     mine = yarn_inv_freq("cpu")

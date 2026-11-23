@@ -1,7 +1,6 @@
 # wsplit2 正确性：GQA/MHA × S 整/非整 32 × 垃圾 pad（含 NaN 位模式）
 # 输出清零防 allocator 复用假阳性；S>4096 参考逐 KV 组分块防 OOM
 import sys
-sys.path.insert(0, "~/torchinfra")
 import torch, torch.nn.functional as F
 from flydsl_kernels.fp8_wrapper import quantize_tensorwise
 

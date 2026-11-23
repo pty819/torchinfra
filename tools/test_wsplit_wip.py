@@ -1,5 +1,4 @@
 import sys
-sys.path.insert(0, "~/torchinfra")
 import torch, torch.nn.functional as F
 import flydsl.compiler as flyc
 import flydsl.expr as fx

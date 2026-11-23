@@ -1,9 +1,10 @@
+import os
 # 1344² 全尺寸 tiling 税 + 正确性对照（worker 已卸载，显存 11.9GB 可用）
 import time, json
 import torch
 
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
+VAE_CFG = os.path.expanduser("~/models/qwen21/fp8/vae21_config.json")
+VAE_W = os.path.expanduser("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from safetensors.torch import load_file
 

@@ -1,3 +1,4 @@
+import os
 """rerank 端到端延迟基准：分解 plan(tokenize) / encode / 前向 / 合并。
 
 用法：
@@ -11,8 +12,8 @@ import torch.nn.functional as F
 
 from torchinfra.jina_rerank import JinaReranker, _format_prompt
 
-FP8 = "~/models/jina-reranker-v3.5-fp8"
-BF16 = "~/models/jina-reranker-v3.5"
+FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
+BF16 = os.path.expanduser("~/models/jina-reranker-v3.5")
 
 WORDS = ("memory recall embedding vector search index latency kernel "
          "gradient attention transformer window causal mask quantization "

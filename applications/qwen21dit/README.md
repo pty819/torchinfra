@@ -1,5 +1,7 @@
 # qwen21dit
 
+`torchinfra` 仓库中的 Qwen-Image-2.1 生成应用；算子由 `torchinfra` 提供。
+
 Qwen-Image-2.1 的手写 PyTorch 推理引擎 + 自研 ROCm/RDNA4 算子，运行于
 AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。DiT 直接加载 fp8 权重，
 采样路径为自研 fp8 注意力内核 + hipBLASLt GEMM，VAE 使用 Diffusers 实现，
@@ -15,20 +17,29 @@ AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。DiT 直接加载 fp8 权重�
   组入口合并（旋转 252→144 次），编码零 GPU 依赖；enc 0.5s 与 GPU 版持平
   （该长度下瓶颈是 252 次 GEMM 派发而非旋转）。RSS 13.4→16.5GB 档
   （原 bf16 全量 21.4GB + 11.8GB swap → 系统可用 1.5→19GB）
-- `serve.py` 常驻 worker（HTTP 7861，含 dec_s/dec_gpu_s 分段计时、/selftest
+- `qwen21dit.serve` 常驻 worker（HTTP 7861，含 dec_s/dec_gpu_s 分段计时、/selftest
   诊断端点）+ web 面板
 
 ## 用法
 
 ```bash
-QDIT_ENC=sqrot2 python phase_a/serve.py  # 默认: W8A8 蝶形合并版
-# QDIT_ENC=sqrot 退回 GPU 旋转版 (长 prompt b≥500 时编码更快)
-python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
+# 在 torchinfra 仓库根目录
+uv sync --all-packages --all-extras
+uv run qwen21dit-serve        # 默认: W8A8 蝶形合并版
+# QDIT_ENC=sqrot uv run qwen21dit-serve  # 退回 GPU 旋转版 (长 prompt b≥500 时编码更快)
+uv run qwen21dit-web         # web 面板 :7860
 ```
 
+## 目录
+
+- `src/qwen21dit/`：运行时代码（worker、DiT、编码器、采样、Gradio 面板）。
+- `scripts/`：离线校准、权重转换、benchmark 和 profiling。
+- `tests/`：无 GPU 回归测试与算子单测。
+- `tools/`：`qwen-draw.sh`、`qwen-web.sh` 启停脚本。
+
 `QDIT_MODEL_DIR` 指定权重根目录（默认 `~/models/qwen21`）；`QDIT_OUTDIR` 指定出图目录
-（默认 `~/Pictures/qwen`，worker 和网页应设为同一个目录）。自研 FP8 注意力需要 `torchinfra`，
-默认从本仓库的同级目录查找，也可用 `QDIT_TORCHINFRA_DIR` 指定。
+（默认 `~/Pictures/qwen`，worker 和网页应设为同一个目录）。自研 FP8 注意力由 workspace
+依赖 `torchinfra` 提供，不需要再设置 `PYTHONPATH` 或同级目录。
 
 ### 适配的权重
 
@@ -65,7 +76,7 @@ ComfyUI 单文件 `Qwen-Image-2.1-text_encoder-FP8.safetensors` 替代这一输�
 - RX 9070 GRE 实测：手动与自动卸载均将 PyTorch 已分配的显存从 **7.6 GiB** 降到 **0 GiB**；
   自动卸载在约 **302 秒**时确认完成，卸载后整卡显存占用约 **0.55 GiB**。
   卸载会释放常驻的模型权重，但不会退出 worker，Python、ROCm 和编译缓存仍可能占用系统内存。
-- 无 GPU 回归测试：`python3 -m unittest discover -s tools -p 'test_qdit_*.py'`。
+- 无 GPU 回归测试：`cd applications/qwen21dit && uv run pytest -m "not gpu"`。
 
 ## 性能工作全史
 

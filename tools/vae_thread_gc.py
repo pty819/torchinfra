@@ -1,9 +1,10 @@
+import os
 # 候选①: decode 在子线程跑; 候选②: 巨型 Python 堆 (GC) 拖慢 tiling 循环
 import time, json, threading
 import torch
 
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
+VAE_CFG = os.path.expanduser("~/models/qwen21/fp8/vae21_config.json")
+VAE_W = os.path.expanduser("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from safetensors.torch import load_file
 cfgd = json.load(open(VAE_CFG))

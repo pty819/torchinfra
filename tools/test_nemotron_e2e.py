@@ -12,7 +12,7 @@ sys.path.insert(0, ".")
 from torchinfra.nemotron_rerank import NemotronReranker
 
 import os
-MODEL = os.environ.get("NEMO_MODEL", "~/models/Nemotron-3.5-Rerank-8B-FP8")
+MODEL = os.environ.get("NEMO_MODEL", os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-FP8"))
 
 ref = json.load(open("/tmp/nemotron_ref.json"))
 print(f"参考 {len(ref)} 对")

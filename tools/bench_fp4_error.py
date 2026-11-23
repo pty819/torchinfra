@@ -1,3 +1,4 @@
+import os
 """三种 4bit 权重量化的重建误差：MXFP4 / NVFP4 / ROCmFP4。
 
 同一批真实权重（Qwen3-0.6B 全部 2D 张量），只比格式本身的反量化误差，
@@ -14,7 +15,7 @@
 import torch
 from safetensors import safe_open
 
-PATH = "~/models/Qwen3-0.6B/model.safetensors"
+PATH = os.path.expanduser("~/models/Qwen3-0.6B/model.safetensors")
 E2M1 = torch.tensor(
     [0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float32)
 # 中点：0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5 → 桶 0..7

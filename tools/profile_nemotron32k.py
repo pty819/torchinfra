@@ -13,7 +13,7 @@ import torch
 
 from torchinfra.nemotron_rerank import NemotronReranker
 
-MODEL = os.environ.get("NEMO_MODEL", "~/models/Nemotron-3.5-Rerank-8B-FP8")
+MODEL = os.environ.get("NEMO_MODEL", os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-FP8"))
 S = int(sys.argv[1]) if len(sys.argv) > 1 else 32768
 N_LAYERS = 34
 

@@ -1,3 +1,4 @@
+import os
 """CPU bf16 参考：transformers 原版 Mistral3ForSequenceClassification 出基准 logits。
 
 输出 /tmp/nemotron_ref.json：每对 (query, doc) 的 prompt token ids + 参考 logit。
@@ -7,7 +8,7 @@ import json, sys, time
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-MODEL = "~/models/Nemotron-3.5-Rerank-8B-BF16"
+MODEL = os.path.expanduser("~/models/Nemotron-3.5-Rerank-8B-BF16")
 
 PAIRS = [
     ("What is the capital of France?", "Paris is the capital and largest city of France."),

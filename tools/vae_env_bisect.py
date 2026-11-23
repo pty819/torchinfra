@@ -10,15 +10,14 @@ if MODE in ("dynamo", "full"):
     f(torch.randn(64, 64, device="cuda"))
     torch.cuda.synchronize()
 if MODE == "full":
-    sys.path.insert(0, "~/torchinfra")
     import triton
     import flydsl_kernels
     from flydsl_kernels.fp8_wrapper import quantize_tensorwise
     q = torch.randn(4, 4, 32, 128, device="cuda", dtype=torch.bfloat16)
     quantize_tensorwise(q)
 
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
+VAE_CFG = os.path.expanduser("~/models/qwen21/fp8/vae21_config.json")
+VAE_W = os.path.expanduser("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from safetensors.torch import load_file
 cfgd = json.load(open(VAE_CFG))

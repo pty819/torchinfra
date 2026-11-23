@@ -5,10 +5,45 @@ PyTorch 之上的迷你 LLM 推理引擎与自定义算子学习栈（ROCm / Rad
 设计文档见 [docs/superpowers/specs/2026-10-19-torchinfra-design.md](docs/superpowers/specs/2026-10-19-torchinfra-design.md)，
 路线：P0 编译链路 → P1 纯 PyTorch 推理引擎 → P2 自定义算子 → P3 paged KV + continuous batching。
 
+## 目录结构
+
+- `torchinfra/`、`flydsl_kernels/`：共享 FP8/Triton/FlyDSL 算子、模型实现与测试。
+- `applications/qwen21dit/`：Qwen-Image-2.1 生成应用（DiT、文本编码器、VAE、worker、Gradio）。
+- `applications/nemotron-serving/`：Nemotron/Jina rerank HTTP 应用。
+
+## 安装
+
+```bash
+uv sync --all-packages --all-extras
+uv run qwen21dit-serve
+uv run qwen21dit-web
+uv run nemotron-serving --help
+```
+
+`uv.lock` 固定 ROCm 10.2 的 AMD wheels、PyTorch 2.15、Triton 3.9 和 FlyDSL；
+ROCm 用户态来自 pip，另需宿主机的 AMD GPU 驱动。首次安装后若 JIT 扩展报错，
+在 `.venv` 内执行一次 `rocm-sdk init`。
+
+### 依赖
+
+| 层 | 依赖 |
+| --- | --- |
+| `torchinfra` 核心 | ROCm 10.2 pip 用户态（core/libraries/devel/device-gfx1201）、PyTorch 2.15.0+rocm10.2.0、Triton 3.9、FlyDSL 0.4.1、safetensors、NumPy |
+| `qwen21dit` | Transformers 5.12、Diffusers 0.43、Pillow、Gradio（`web` extra） |
+| `nemotron-serving` | Transformers 5.12、safetensors |
+| 宿主 | AMD GPU 驱动（不由 pip 提供） |
+
+精确版本和 wheel URL 由 `uv.lock` 固定。AMD 的 ROCm/PyTorch 索引见根 `pyproject.toml`
+的 `[[tool.uv.index]]` 与 `[tool.uv.sources]`。
+
+FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
+`llvm.mlir.constant` 的 `index`/`i64` 属性写法上不一致；`flydsl_kernels/flydsl_compat.py`
+在外部 codegen 文本上做兼容重写，gfx1201 FP8 attention 已重新编译并对拍。
+
 ## 环境（P0 踩坑结论，换机器/重建 venv 必读）
 
-- venv：`~/rocm10`（uv 创建，Python 3.14.7，ROCm 10.1 pip wheels + torch 2.14.0+rocm10.1.0）
-- **必须先执行一次 `~/rocm10/bin/rocm-sdk init`**：展开 devel payload（thrust、hipblas
+- venv：迁移前为 `~/rocm10`（Python 3.14.7）；当前用 `uv sync` 创建 `.venv`，版本以 `uv.lock` 为准（ROCm 10.2 / torch 2.15 / triton 3.9）
+- **必须先执行一次 `.venv/bin/rocm-sdk init`**：展开 devel payload（thrust、hipblas
   等头文件）并把 device 文件链接进 devel 树。未展开时 JIT 扩展编译会报
   `thrust/complex.h file not found`；展开前 torch 把 ROCM_HOME 解析到
   `_rocm_sdk_core`，展开后正确解析到 `_rocm_sdk_devel`
@@ -33,14 +68,15 @@ ninja            # 原始错误直接可见
 ## 运行测试
 
 ```bash
-cd ~/项目/torchinfra
-for t in tests/test_*.py; do PYTHONPATH=. ~/rocm10/bin/python $t; done
+uv sync --all-packages --all-extras
+cd applications/qwen21dit && uv run pytest -m "not gpu"
+for t in tests/test_*.py; do .venv/bin/python "$t"; done   # 部分测试需要 GPU/模型
 ```
 
 ## 对话
 
 ```bash
-cd ~/项目/torchinfra
+cd torchinfra
 PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 ```
 
@@ -295,7 +331,7 @@ PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
 
 jina-reranker-v3.5 = Qwen3-0.6B 骨干 + 16/28 层滑窗注意力 + projector 余弦打分。
 `torchinfra/jina_rerank.py` 在引擎之上自研前向（注意力走 SDPA / 自研滑窗 kernel，
-norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`rerank_server.py`
+norm/QKV/MLP 走 P2 Triton 融合 + tensorwise E4M3 权重/激活量化），`applications/nemotron-serving/.../server.py`
 提供 vLLM 风格 `/v1/rerank` 并发服务（调度器多请求块拼批）。对拍
 （`tests/test_jina_rerank.py`，vs 官方 HF forward）：分数误差 < 0.005。
 
@@ -382,9 +418,9 @@ S=256/1024/4096/8192 全 0），跨桶真实文本只约束投影归一化后的
 
 ### serving：标准 rerank API（0.0.0.0）
 
-    cd ~/项目/torchinfra
+    cd torchinfra
     PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_RESULT_FILE=./tunableop_results0.csv \
-    PYTHONPATH=. nohup ~/rocm10/bin/python -m torchinfra.rerank_server \
+    nohup uv run nemotron-serving \
         --host 0.0.0.0 --port 8000 --model ~/models/jina-reranker-v3.5-fp8 &
 
 对外是 Jina/Cohere/vLLM 通用的 `/v1/rerank`（另 `/rerank`、`/health`、
@@ -521,7 +557,7 @@ batch 恢复逐位一致（Δ=0.00e+00）。
 
 ### serving：Nemotron 走同一套 /v1/rerank（P13.2，2026-10-24）
 
-    PYTHONPATH=. nohup ~/rocm10/bin/python -m torchinfra.rerank_server \
+    nohup uv run nemotron-serving \
         --host 0.0.0.0 --port 8000 \
         --model ~/models/Nemotron-3.5-Rerank-8B-FP8S &
 

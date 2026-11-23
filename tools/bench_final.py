@@ -1,5 +1,4 @@
 import sys, os
-sys.path.insert(0, "~/torchinfra")
 import torch
 from flydsl_kernels.fp8_wrapper import quantize_tensorwise
 from flydsl_kernels.flash_attn_fp8_wsplit import build_flash_attn_fp8_wsplit_module as build_old

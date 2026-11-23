@@ -37,17 +37,20 @@
 ## 4. 目录（示例）
 
 ```
-qwen21dit/
-├─ docs/specs/          # 本文档
-├─ phase_a/             # PyTorch fp8 直跑（M0 测距 + 常驻管线）
-│   ├─ dit_forward.py   # diffusers 或手搭
-│   ├─ loader_fp8.py    # unsloth fp8 + Omni LoRA 叠加
-│   ├─ bench.py         # 四组测距 + rocprof 分桶
-│   └─ serve.py         # 常驻进程，接现有 gradio（替换 sd-cli 起进程）
-├─ phase_b/             # Gate 通过后启动
-│   ├─ glue_triton/
-│   └─ attn_flydsl/
-└─ weights/             # 下载与 LoRA 离线 merge 脚本（可选优化）
+applications/qwen21dit/
+├─ docs/                # 设计与测距记录
+├─ src/qwen21dit/       # 运行时代码
+│   ├─ serve.py         # 常驻 worker
+│   ├─ web.py           # Gradio 面板
+│   ├─ dit_forward.py
+│   ├─ encoder.py
+│   ├─ loader.py
+│   ├─ sample.py
+│   └─ ...
+├─ scripts/             # 离线量化 / benchmark
+├─ tests/               # CPU 回归；tests/gpu/ 为 GPU 对拍
+├─ tools/               # 启停脚本
+└─ pyproject.toml
 ```
 
 ## 5. 风险与对策

@@ -1,5 +1,4 @@
 import sys, os
-sys.path.insert(0, "~/torchinfra")
 from flydsl.expr.enum import AtomicOrdering as _AO
 ORD_ARR = getattr(_AO, os.environ.get("ORD_ARR", "SeqCst"))
 ORD_POLL = getattr(_AO, os.environ.get("ORD_POLL", "SeqCst"))

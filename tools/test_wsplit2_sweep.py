@@ -1,6 +1,5 @@
 # wsplit2 S 扫描二分：找出误差开始复合的位置
 import sys
-sys.path.insert(0, "~/torchinfra")
 import torch, torch.nn.functional as F
 from flydsl_kernels.fp8_wrapper import quantize_tensorwise
 from flydsl_kernels.flash_attn_fp8_wsplit2 import build_flash_attn_fp8_wsplit2_module

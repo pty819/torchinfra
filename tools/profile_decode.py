@@ -1,3 +1,4 @@
+import os
 """decode 热循环剖析：把每步 wall 时长拆成 纯 GPU 时长 / CPU 串行间隙。
 
 三种口径：
@@ -16,7 +17,7 @@ from torchinfra.model import Qwen3ForCausalLM
 from torchinfra.tokenizer import TokenizerBox
 from torchinfra.scheduler import Scheduler
 
-MODEL_DIR = "~/models/Qwen3-0.6B"
+MODEL_DIR = os.path.expanduser("~/models/Qwen3-0.6B")
 N_STEPS = 100
 
 

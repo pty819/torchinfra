@@ -1,3 +1,4 @@
+import os
 """CUDA Graph 前向路径对拍：graph vs eager。
 
 两层门禁：
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 sys.path.insert(0, ".")
 from torchinfra.jina_rerank import JinaReranker, _format_prompt, DOC_ID  # noqa: E402
 
-FP8 = "~/models/jina-reranker-v3.5-fp8"
+FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
 
 
 def real_ids(r, n_docs, repeat):

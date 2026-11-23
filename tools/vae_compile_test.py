@@ -1,9 +1,10 @@
+import os
 # torch.compile(VAE decoder) 验证: 176² 时间 + 数值
 import time, json
 import torch
 
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
+VAE_CFG = os.path.expanduser("~/models/qwen21/fp8/vae21_config.json")
+VAE_W = os.path.expanduser("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from safetensors.torch import load_file
 cfgd = json.load(open(VAE_CFG))

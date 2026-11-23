@@ -1,3 +1,4 @@
+import os
 """reranker 前向的 torch.compile 实验：延迟 + 数值对拍（fp8 路径）。
 
 对拍是硬门（P8 曾有 _fused_kernel 深层链翻转 bug 的前科）：
@@ -11,7 +12,7 @@ import torch
 sys.path.insert(0, ".")
 from torchinfra.jina_rerank import JinaReranker  # noqa: E402
 
-FP8 = "~/models/jina-reranker-v3.5-fp8"
+FP8 = os.path.expanduser("~/models/jina-reranker-v3.5-fp8")
 
 
 def bench(fn, n=20):

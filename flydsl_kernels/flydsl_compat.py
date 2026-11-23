@@ -65,6 +65,15 @@ def _generic_asm_bridge() -> None:
         # none) — verified empirically — so strip it from the emitted text.
         txt = txt.replace("modC = #rocdl.wmma_c_modifier<none>, ", "")
         txt = txt.replace(", modC = #rocdl.wmma_c_modifier<none>", "")
+        # MLIR 24 prints llvm.mlir.constant with an index-typed value while
+        # the result is i64; the external MLIR 23 parser rejects that pair.
+        # The value is an integer constant, so spell it with the result type.
+        import re
+        txt = re.sub(
+            r'("llvm.mlir.constant"\(\) <\{value = [^}]+) : index(\}> : \(\) -> (i\d+))',
+            lambda m: f"{m.group(1)} : {m.group(3)}{m.group(2)}",
+            txt,
+        )
         return txt
 
     def _run(*a, **k):

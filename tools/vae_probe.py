@@ -1,10 +1,11 @@
+import os
 # VAE decode 浪费画像：小图无 tiling 基线 + profiler 热点 + patch A/B
 import sys, time, json
 import torch
 import torch.nn.functional as F
 
-VAE_CFG = "~/models/qwen21/fp8/vae21_config.json"
-VAE_W = "~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors"
+VAE_CFG = os.path.expanduser("~/models/qwen21/fp8/vae21_config.json")
+VAE_W = os.path.expanduser("~/models/qwen21/qwen_image_2.1_vae_diffusers.safetensors")
 
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 cfgd = json.load(open(VAE_CFG))

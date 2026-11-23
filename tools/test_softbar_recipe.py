@@ -2,7 +2,6 @@
 # 结构镜像 wsplit：for+yield 携带(10 值) + 双计数器(ci_data/ci_done) + leader 到达 + 2 barrier/轮
 # 排序参数化：ARR∈{rel,acqrel,mono} SPIN∈{plain,atomacq} FENCE∈{none,seqcst}
 import sys, os
-sys.path.insert(0, "~/torchinfra")
 ARR = os.environ.get("ARR", "rel")        # arrive 原子排序
 SPIN = os.environ.get("SPIN", "plain")    # 自旋读法
 FENCE = os.environ.get("FENCE", "none")   # 额外 fence

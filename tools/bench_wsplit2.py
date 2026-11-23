@@ -2,7 +2,6 @@
 # MHA 32/32 S=7102（qdit 生产形状, legacy 基线 88TF/9.39ms）
 # GQA 32/8 S=2048/8192（旧 wsplit 基线 59.6/74.2 TF）
 import sys
-sys.path.insert(0, "~/torchinfra")
 import torch, torch.nn.functional as F
 from flydsl_kernels.fp8_wrapper import quantize_tensorwise
 from flydsl_kernels.flash_attn_fp8_wsplit2 import build_flash_attn_fp8_wsplit2_module as build_new
