@@ -78,6 +78,23 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 6. **B2 批量 CFG**、**B3 2D grid**、**VAE tiling**、**encoder compile**：
    各自未过门或负收益，详见 docs。
 7. **CPU W4**：VNNI 无 int4 路径，eager 解包反而更慢；留待手写融合 kernel。
+8. **int8 矩阵算力（为抄 SageAttention 做的硬件实测，2026-11-23）**：
+   gfx1201 上 int8 与 fp8 **同速且 int8 略慢** —— 8192³ int8 `_int_mm`
+   145.4 TOPS vs fp8 `_scaled_mm` 149.7 TF（**0.97×**）；8192×4096² 0.93×；
+   4096³ 0.95×。内核名 `I8II` vs `F8BS` 同 tile MT128x128x32/MI16x16x1，
+   证明走真张量核心而非模拟。旁证：NVIDIA Ada 官方白皮书 RTX 4090
+   FP8 dense 660.6 TFLOPS = INT8 dense 660.6 TOPS，同样相等；int8 的 2×
+   优势在 INT4（1321 vs 660），不在 int8-vs-fp8。
+   → 结论：QK 由 fp8 换 int8 无速度收益，此路线关闭。
+9. **SageAttention（N 卡低精度注意力库）无可抄项**：kernel 为 CUDA 专属
+   （Ampere/Hopper mma 形状、Sage3 用 Blackwell tcgen05+fp4），ROCm 无支持。
+   算法层可抄的三项对我们是零或纯精度收益：① int8 QK（速度动机已被第 8 条
+   证伪，只剩精度）；② Sage2 细粒度缩放（我们已是 tensorwise fp8，改
+   per-block 仅精度保险，非必需）；③ smoothK 减均值（同上）。fp4 PV（Sage3）
+   无硬件。其 2× 红利是"16 位→8 位"，我们早已吃掉（fp8 全链路）。
+   → 与 warp-split 同档封存，避免重复调研。
+   副产品：同机 fp8 GEMM 大 M 形状实测 **149-174 TF = bf16 的 1.6-1.7×**
+   （8192³ 149.7、8192×4096² 173.8），高于此前记录的 hipBLASLt FP8 ~139 TF。
 
 ### 已识别未做
 
