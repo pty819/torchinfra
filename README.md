@@ -101,6 +101,21 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
    副产品：同机 fp8 GEMM 大 M 形状实测 **149-174 TF = bf16 的 1.6-1.7×**
    （8192³ 149.7、8192×4096² 173.8），高于此前记录的 hipBLASLt FP8 ~139 TF。
 
+10. **2:4 结构化稀疏（稀疏算力）**：不仅是"我们用不上"，而是**业界已验证
+   不值得**。硬件前提：权重侧 + 沿归约轴 + 固定 2:4 零 pattern，需稀疏化训练
+   或 SparseGPT 类后训练剪枝恢复精度（vLLM 上唯一可用的例子重训了 130 亿
+   token；一次性剪枝不可用）。实测天花板：指令级确有 2× 数学吞吐
+   （NVIDIA arXiv 2104.08378），但端到端仅 **1.1~1.4×，L4 上有人测出 0×**
+   （NVIDIA Model-Optimizer #1974 / TensorRT 论坛：sparse-eligible 层为 0）；
+   attention/norm/访存不吃稀疏 + 稀疏 kernel 成熟度差 + 功耗墙，三重稀释。
+   生态信号：**2026 年 vLLM 与 LLM Compressor 直接移除了 2:4 支持**（用的人
+   太少）；SemiAnalysis：多数 AI 实验室生产推理忽略 2:4，转向量化与蒸馏。
+   唯一成立场景是"已到硬件最低精度地板（FP8/NVFP4）且计算受限 + 有预算重训"
+   ——H100 FP8+2:4 在 vLLM 上 prefill +27%（论文 2610.28947）。我们的位置：
+   未到地板、非算力瓶颈（wall vs GPU <1s）、权重为官方稠密 fp8、ROCm 稀疏
+   GEMM 生态只会更弱。→ 与 int8/fp4 同档排除，且性质更明确：不是"用不上"，
+   是"行业验证过不值得"。
+
 ### 已识别未做
 
 - **VAE dec 剩余 3.8s CPU dispatch 间隙**（与换页无关，worker 大图 20 万次
