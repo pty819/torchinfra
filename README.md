@@ -82,9 +82,14 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
    gfx1201 上 int8 与 fp8 **同速且 int8 略慢** —— 8192³ int8 `_int_mm`
    145.4 TOPS vs fp8 `_scaled_mm` 149.7 TF（**0.97×**）；8192×4096² 0.93×；
    4096³ 0.95×。内核名 `I8II` vs `F8BS` 同 tile MT128x128x32/MI16x16x1，
-   证明走真张量核心而非模拟。旁证：NVIDIA Ada 官方白皮书 RTX 4090
-   FP8 dense 660.6 TFLOPS = INT8 dense 660.6 TOPS，同样相等；int8 的 2×
-   优势在 INT4（1321 vs 660），不在 int8-vs-fp8。
+   证明走真张量核心而非模拟。旁证（NVIDIA 官方白皮书，int8 与 fp8 三代
+   严格 1:1）：RTX 4090 FP8 660.6 = INT8 660.6；H100 SXM FP8 3958 = INT8
+   3958；B200 FP8 4.5 = INT8 4.5 PFLOPS；B300 反而把 INT8 砍到 3（FP8 仍
+   4.5）。"int8 高 2 倍"的三个真实来源：① INT4 vs INT8（位宽减半，4090
+   1321 vs 660）；② 2:4 稀疏 vs 稠密（与格式无关）；③ FP8 vs FP16
+   （SageAttention 吃的正是这步）。历史误解源于 A100 时代 INT8 2958 对比的
+   是 FP16 312（FP8 当时不存在），跨代错配。另注：Ada 白皮书 FP8 660→330
+   是 FP32 累加口径差异，与 RDNA4 现象同源——fp8 瓶颈常在累加器/输出转换。
    → 结论：QK 由 fp8 换 int8 无速度收益，此路线关闭。
 9. **SageAttention（N 卡低精度注意力库）无可抄项**：kernel 为 CUDA 专属
    （Ampere/Hopper mma 形状、Sage3 用 Blackwell tcgen05+fp4），ROCm 无支持。
