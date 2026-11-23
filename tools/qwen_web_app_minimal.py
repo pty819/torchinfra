@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Qwen Draw · qdit 极简面板: 预热 + 提示词 + 进度 + 历史
+"""Qwen Draw · qdit 极简面板: 预热 + 提示词 + 进度 + 历史 + 刷新重连
 固定配置: 1344² · 20步 er_sde · CFG4 · 负向" " · NSFW 三件套 LoRA 内置(worker 侧)
 旧双引擎版在 app_sdcpp.py"""
 import os, time, glob, json, random
@@ -12,6 +12,7 @@ HOME = os.path.expanduser("~")
 OUTDIR = f"{HOME}/Pictures/qwen"
 QDIT = "http://127.0.0.1:7861"
 STEPS, CFG, SIZE, SAMPLER = 20, 4.0, 1344, "er_sde"
+ACTIVE = "/tmp/qdit_web_active.json"   # 活任务登记: 页面刷新/换设备后自动重连
 
 def _ts_ip():
     try:
@@ -28,6 +29,26 @@ def _post(path, payload=None, timeout=15):
 def _get(path, timeout=15):
     with _ur.urlopen(QDIT + path, timeout=timeout) as r:
         return json.loads(r.read())
+
+def _active_save(d):
+    try:
+        json.dump(d, open(ACTIVE, "w"))
+    except Exception:
+        pass
+
+def _active_load():
+    try:
+        return json.load(open(ACTIVE))
+    except Exception:
+        return None
+
+def _active_clear():
+    try:
+        os.remove(ACTIVE)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 def qdit_state():
     try:
@@ -71,6 +92,10 @@ def warm(prompt, progress=gr.Progress()):
     progress(1.0, desc="预热完成")
     return status_text()
 
+def _fmt_info(tag, seed, job, t0):
+    return (f"{tag} seed `{seed}` · 编码 {job.get('enc_s')}s · 采样 {job.get('sample_s')}s · "
+            f"VAE {job.get('vae_s')}s · ⏱ {time.time()-t0:.0f}s\n\n已存: `{job.get('image','')}`")
+
 def generate(prompt, progress=gr.Progress()):
     if not prompt or not prompt.strip():
         raise gr.Error("提示词不能为空")
@@ -85,11 +110,36 @@ def generate(prompt, progress=gr.Progress()):
     t0 = time.time()
     j = _post("/generate", {"prompt": prompt.strip(), "neg": " ", "seed": seed,
                             "steps": STEPS, "cfg": CFG, "size": SIZE, "sampler": SAMPLER})["job"]
+    _active_save({"jid": j, "prompt": prompt.strip(), "seed": seed, "t0": t0})
     job = _poll(j, progress, 0.15, 0.95)
     progress(1.0, desc="完成")
-    info = (f"seed `{seed}` · 编码 {job.get('enc_s')}s · 采样 {job.get('sample_s')}s · "
-            f"VAE {job.get('vae_s')}s · ⏱ {time.time()-t0:.0f}s\n\n已存: `{job.get('image','')}`")
-    return job.get("image"), info
+    # 不清 active: 留作"最近任务"记录, 页面刷新后由 resume 弹结果/清文件
+    return job.get("image"), _fmt_info("", seed, job, t0)
+
+def resume(progress=gr.Progress()):
+    """页面(重)加载时: 若有活任务则自动重连, 后台已完成的直接弹结果"""
+    a = _active_load()
+    if not a or not a.get("jid"):
+        return gr.update(), gr.update(), refresh_gallery()
+    try:
+        j = _get(f"/job/{a['jid']}", timeout=10)
+    except Exception:
+        return gr.update(), gr.update(), refresh_gallery()
+    if j.get("status") == "unknown":       # worker 重启过, 任务没了
+        _active_clear()
+        return gr.update(), gr.update(), refresh_gallery()
+    if j.get("status") == "done":
+        _active_clear()
+        return (j.get("image"), _fmt_info("(后台已完成)", a.get("seed"), j, a.get("t0", time.time())),
+                refresh_gallery())
+    if j.get("status") == "error":
+        _active_clear()
+        return (gr.update(), "*(后台任务失败)* " + str(j.get("error", ""))[:200], gr.update())
+    progress(0.15, desc="重连运行中的任务…")
+    job = _poll(a["jid"], progress, 0.15, 0.95)
+    _active_clear()
+    progress(1.0, desc="重连完成")
+    return job.get("image"), _fmt_info("(重连完成)", a.get("seed"), job, a.get("t0", time.time())), refresh_gallery()
 
 def refresh_gallery():
     files = sorted(glob.glob(f"{OUTDIR}/qwen_*.png"), key=os.path.getmtime, reverse=True)[:60]
@@ -113,6 +163,7 @@ with gr.Blocks(title="Qwen Draw · qdit") as demo:
     warm_btn.click(warm, [prompt], status)
     btn.click(generate, [prompt], [image, info])
     rf.click(refresh_gallery, None, g)
+    demo.load(resume, None, [image, info, g])
     demo.load(refresh_gallery, None, g)
     demo.load(status_text, None, status)
 
