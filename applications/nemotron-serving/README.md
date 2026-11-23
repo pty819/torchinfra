@@ -54,6 +54,10 @@ Jina bi-encoder；原有 `/v1/rerank`、`/rerank`、`/health`、`/v1/models` 不
 
 模型权重和 LoRA 遵循各自上游研究许可（部分非商用）。
 
+## 许可
+
+代码采用 [GPL-3.0-or-later](../../LICENSE)（见仓库根 `LICENSE`）。
+
 ## 测试
 
 ```bash

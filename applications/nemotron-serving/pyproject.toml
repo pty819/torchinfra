@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nemotron-serving"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 description = "Nemotron/Jina rerank HTTP serving on torchinfra"
 requires-python = ">=3.14,<3.15"
 dependencies = [

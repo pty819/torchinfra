@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "torchinfra"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 description = "ROCm/RDNA4 FP8 kernels and mini inference stack"
 requires-python = ">=3.14,<3.15"
 dependencies = [

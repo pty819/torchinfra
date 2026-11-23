@@ -197,4 +197,5 @@ ComfyUI 单文件 `Qwen-Image-2.1-text_encoder-FP8.safetensors` 替代这一输�
 
 ## 许可
 
-权重与 LoRA 遵循各自上游研究许可（非商用）。代码仅供学习研究。
+代码采用 [GPL-3.0-or-later](../../LICENSE)（见仓库根 `LICENSE`）。权重与 LoRA
+遵循各自上游研究许可（非商用）。

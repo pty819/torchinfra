@@ -69,8 +69,13 @@ FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
 [applications/qwen21dit/README.md](applications/qwen21dit/README.md)。`nemotron-serving`
 用 `--model` 指向本地 Jina 或 Nemotron FP8 目录，见
 [applications/nemotron-serving/README.md](applications/nemotron-serving/README.md)。
-仓库代码目前未附 `LICENSE`（默认保留所有权利）；权重和 LoRA 遵循各自上游研究
-许可（部分非商用）。
+权重和 LoRA 不在本仓库，遵循各自上游研究许可（部分非商用）。
+
+## 许可证
+
+代码采用 [GPL-3.0-or-later](LICENSE)，版权声明见 [NOTICE](NOTICE)。
+`flydsl_kernels/` 中 vendored 自 ROCm/aiter 与 FlyDSL 的文件保留 Apache-2.0，
+见文件头与 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)。
 
 ## 环境（P0 踩坑结论，换机器/重建 venv 必读）
 

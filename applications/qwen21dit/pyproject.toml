@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "qwen21dit"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 description = "Qwen-Image-2.1 inference application on torchinfra"
 requires-python = ">=3.14,<3.15"
 dependencies = [
