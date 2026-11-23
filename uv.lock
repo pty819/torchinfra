@@ -17,19 +17,14 @@ members = [
 [[package]]
 name = "amd-torch-device-gfx1201"
 version = "2.15.0+rocm10.2.0"
-source = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" }
+source = { registry = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" }
 dependencies = [
     { name = "rocm-sdk-device-gfx1201" },
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl", hash = "sha256:6c43b6476710c17a6d87c99f90eab827b323e62bd72a2f9c3a77a05fd79fd6b8" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "rocm-sdk-device-gfx1201", specifier = "~=10.2.0" },
-    { name = "torch", specifier = "==2.15.0+rocm10.2.0" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-win_amd64.whl" },
 ]
 
 [[package]]
@@ -537,11 +532,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "safetensors", specifier = ">=0.8,<0.9" },
-    { name = "torch", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "safetensors", specifier = ">=0.8.0" },
+    { name = "torch", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
     { name = "torchinfra", editable = "." },
-    { name = "transformers", specifier = ">=5.12,<5.13" },
+    { name = "transformers", specifier = ">=5.12.1" },
 ]
 
 [[package]]
@@ -821,16 +816,16 @@ web = [
 
 [package.metadata]
 requires-dist = [
-    { name = "diffusers", specifier = ">=0.43,<0.44" },
-    { name = "gradio", marker = "extra == 'web'", specifier = ">=6.32,<6.33" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "pillow", specifier = ">=12,<13" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "safetensors", specifier = ">=0.8,<0.9" },
-    { name = "torch", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { name = "diffusers", specifier = ">=0.43.0" },
+    { name = "gradio", marker = "extra == 'web'", specifier = ">=6.32.0" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.2.0" },
+    { name = "safetensors", specifier = ">=0.8.0" },
+    { name = "torch", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
     { name = "torchinfra", editable = "." },
-    { name = "transformers", specifier = ">=5.12,<5.13" },
-    { name = "triton", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { name = "transformers", specifier = ">=5.12.1" },
+    { name = "triton", specifier = ">=3.9.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
 ]
 provides-extras = ["web", "dev"]
 
@@ -1092,7 +1087,7 @@ wheels = [
 [[package]]
 name = "torch"
 version = "2.15.0+rocm10.2.0"
-source = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" }
+source = { registry = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
@@ -1106,89 +1101,9 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl", hash = "sha256:a84810c4e14f88028b3e809e9588fbeeb9c785b0d18a49f7df87074b5e62f928" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-win_amd64.whl" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "amd-torch-device-gfx1010", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1010", marker = "extra == 'device-gfx1010'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1011", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1011", marker = "extra == 'device-gfx1011'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1012", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1012", marker = "extra == 'device-gfx1012'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1030", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1030", marker = "extra == 'device-gfx1030'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1031", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1031", marker = "extra == 'device-gfx1031'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1032", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1032", marker = "extra == 'device-gfx1032'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1033", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1033", marker = "extra == 'device-gfx1033'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1034", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1034", marker = "extra == 'device-gfx1034'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1035", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1035", marker = "extra == 'device-gfx1035'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1036", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1036", marker = "extra == 'device-gfx1036'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1100", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1100", marker = "extra == 'device-gfx1100'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1101", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1101", marker = "extra == 'device-gfx1101'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1102", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1102", marker = "extra == 'device-gfx1102'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1103", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1103", marker = "extra == 'device-gfx1103'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx110x", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx110x", marker = "extra == 'device-gfx1100'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx110x", marker = "extra == 'device-gfx1101'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx110x", marker = "extra == 'device-gfx1102'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx110x", marker = "extra == 'device-gfx1103'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1150", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1150", marker = "extra == 'device-gfx1150'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1151", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1151", marker = "extra == 'device-gfx1151'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1152", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1152", marker = "extra == 'device-gfx1152'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1153", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1153", marker = "extra == 'device-gfx1153'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx115x", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx115x", marker = "extra == 'device-gfx1150'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx115x", marker = "extra == 'device-gfx1151'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx115x", marker = "extra == 'device-gfx1152'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx115x", marker = "extra == 'device-gfx1153'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx12-0", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx12-0", marker = "extra == 'device-gfx1200'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx12-0", marker = "extra == 'device-gfx1201'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1200", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1200", marker = "extra == 'device-gfx1200'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1201", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1201", marker = "extra == 'device-gfx1201'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1250", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx1250", marker = "extra == 'device-gfx1250'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx908", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx908", marker = "extra == 'device-gfx908'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx90a", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx90a", marker = "extra == 'device-gfx90a'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx942", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx942", marker = "extra == 'device-gfx942'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx950", marker = "extra == 'device-all'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "amd-torch-device-gfx950", marker = "extra == 'device-gfx950'", specifier = "==2.15.0+rocm10.2.0" },
-    { name = "filelock" },
-    { name = "fsspec", specifier = ">=0.8.5" },
-    { name = "jinja2" },
-    { name = "networkx", specifier = ">=2.5.1" },
-    { name = "opt-einsum", marker = "extra == 'opt-einsum'", specifier = ">=3.3" },
-    { name = "optree", marker = "extra == 'optree'", specifier = ">=0.13.0" },
-    { name = "pyyaml", marker = "extra == 'pyyaml'" },
-    { name = "rocm", extras = ["libraries"], specifier = "~=10.2.0" },
-    { name = "rocm-bootstrap", specifier = ">=0.3.0" },
-    { name = "setuptools", specifier = ">=77.0.3" },
-    { name = "sympy", specifier = ">=1.13.3" },
-    { name = "triton", specifier = "==3.9.0+git0a6e13e6.rocm10.2.0" },
-    { name = "typing-extensions", specifier = ">=4.13.0" },
-]
-provides-extras = ["optree", "opt-einsum", "pyyaml", "device-gfx1010", "device-gfx1011", "device-gfx1012", "device-gfx1030", "device-gfx1031", "device-gfx1032", "device-gfx1033", "device-gfx1034", "device-gfx1035", "device-gfx1036", "device-gfx1100", "device-gfx1101", "device-gfx1102", "device-gfx1103", "device-gfx1150", "device-gfx1151", "device-gfx1152", "device-gfx1153", "device-gfx1200", "device-gfx1201", "device-gfx1250", "device-gfx908", "device-gfx90a", "device-gfx942", "device-gfx950", "device-all"]
 
 [[package]]
 name = "torchinfra"
@@ -1211,14 +1126,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "amd-torch-device-gfx1201", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
-    { name = "flydsl", specifier = "==0.4.1" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "rocm", extras = ["libraries", "devel", "device-gfx1201"], specifier = "==10.2.0", index = "https://stable.repo.amd.com/rocm/core/whl-next/" },
-    { name = "safetensors", specifier = ">=0.8,<0.9" },
-    { name = "torch", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" },
-    { name = "triton", url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl" },
+    { name = "amd-torch-device-gfx1201", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
+    { name = "flydsl", specifier = ">=0.4.1" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.2.0" },
+    { name = "rocm", extras = ["libraries", "devel", "device-gfx1201"], specifier = ">=10.2.0", index = "https://stable.repo.amd.com/rocm/core/whl-next/" },
+    { name = "safetensors", specifier = ">=0.8.0" },
+    { name = "torch", specifier = ">=2.15.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
+    { name = "triton", specifier = ">=3.9.0", index = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" },
 ]
 provides-extras = ["dev"]
 
@@ -1257,13 +1172,10 @@ wheels = [
 [[package]]
 name = "triton"
 version = "3.9.0+git0a6e13e6.rocm10.2.0"
-source = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl" }
+source = { registry = "https://stable.repo.amd.com/rocm/pytorch/whl-next/" }
 wheels = [
-    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl", hash = "sha256:0d5b6dc9cec83e0f0910bc11457ebd7d16b25b55a95e3dd6bcfc512911c87f79" },
+    { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "importlib-metadata", marker = "python_full_version < '3.10'" }]
 
 [[package]]
 name = "typer"

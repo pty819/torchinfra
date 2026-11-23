@@ -20,9 +20,9 @@ uv run qwen21dit-web
 uv run nemotron-serving --help
 ```
 
-`uv.lock` 固定 ROCm 10.2 的 AMD wheels、PyTorch 2.15、Triton 3.9 和 FlyDSL；
-ROCm 用户态来自 pip，另需宿主机的 AMD GPU 驱动。首次安装后若 JIT 扩展报错，
-在 `.venv` 内执行一次 `rocm-sdk init`。
+`pyproject.toml` 只声明 `>=` 下限；`uv.lock` 记录实际验证过的 ROCm 10.2 wheels、
+PyTorch 2.15、Triton 3.9 和 FlyDSL 0.4.1。ROCm 用户态来自 pip，另需宿主机的
+AMD GPU 驱动。首次安装后若 JIT 扩展报错，在 `.venv` 内执行一次 `rocm-sdk init`。
 
 ### 依赖
 
@@ -33,8 +33,9 @@ ROCm 用户态来自 pip，另需宿主机的 AMD GPU 驱动。首次安装后�
 | `nemotron-serving` | Transformers 5.12、safetensors |
 | 宿主 | AMD GPU 驱动（不由 pip 提供） |
 
-精确版本和 wheel URL 由 `uv.lock` 固定。AMD 的 ROCm/PyTorch 索引见根 `pyproject.toml`
-的 `[[tool.uv.index]]` 与 `[tool.uv.sources]`。
+`pyproject.toml` 只给出最低版本，实际版本与 wheel 来源由 `uv.lock` 固定；
+需要升级时运行 `uv lock --upgrade`，不要直接改锁文件。AMD 的 ROCm/PyTorch 索引
+见根 `pyproject.toml` 的 `[[tool.uv.index]]` 与 `[tool.uv.sources]`。
 
 FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
 `llvm.mlir.constant` 的 `index`/`i64` 属性写法上不一致；`flydsl_kernels/flydsl_compat.py`

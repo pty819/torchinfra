@@ -8,17 +8,17 @@ version = "0.1.0"
 description = "ROCm/RDNA4 FP8 kernels and mini inference stack"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "rocm[libraries,devel,device-gfx1201]==10.2.0",
-    "torch",
-    "triton",
-    "amd-torch-device-gfx1201",
-    "flydsl==0.4.1",
-    "safetensors>=0.8,<0.9",
-    "numpy>=2,<3",
+    "rocm[libraries,devel,device-gfx1201]>=10.2.0",
+    "torch>=2.15.0",
+    "triton>=3.9.0",
+    "amd-torch-device-gfx1201>=2.15.0",
+    "flydsl>=0.4.1",
+    "safetensors>=0.8.0",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=9.2.0"]
 
 [tool.uv.workspace]
 members = ["applications/qwen21dit", "applications/nemotron-serving"]
@@ -27,11 +27,16 @@ members = ["applications/qwen21dit", "applications/nemotron-serving"]
 name = "rocm"
 url = "https://stable.repo.amd.com/rocm/core/whl-next/"
 
+[[tool.uv.index]]
+name = "rocm-pytorch"
+url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/"
+explicit = true
+
 [tool.uv.sources]
 rocm = { index = "rocm" }
-torch = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" }
-triton = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/triton/triton-3.9.0%2Bgit0a6e13e6.rocm10.2.0-cp314-cp314-linux_x86_64.whl" }
-amd-torch-device-gfx1201 = { url = "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1201/amd_torch_device_gfx1201-2.15.0%2Brocm10.2.0-cp314-cp314-linux_x86_64.whl" }
+torch = { index = "rocm-pytorch" }
+triton = { index = "rocm-pytorch" }
+amd-torch-device-gfx1201 = { index = "rocm-pytorch" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["torchinfra", "flydsl_kernels"]

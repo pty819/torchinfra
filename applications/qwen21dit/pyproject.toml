@@ -9,18 +9,18 @@ description = "Qwen-Image-2.1 inference application on torchinfra"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "torchinfra",
-    "torch",
-    "triton",
-    "transformers>=5.12,<5.13",
-    "diffusers>=0.43,<0.44",
-    "safetensors>=0.8,<0.9",
-    "pillow>=12,<13",
-    "numpy>=2,<3",
+    "torch>=2.15.0",
+    "triton>=3.9.0",
+    "transformers>=5.12.1",
+    "diffusers>=0.43.0",
+    "safetensors>=0.8.0",
+    "pillow>=12.3.0",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]
-web = ["gradio>=6.32,<6.33"]
-dev = ["pytest>=8"]
+web = ["gradio>=6.32.0"]
+dev = ["pytest>=9.2.0"]
 
 [project.scripts]
 qwen21dit-serve = "qwen21dit.serve:main"
