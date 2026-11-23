@@ -1,3 +1,4 @@
+# ARCHIVED: warp-split v2 experiment; production uses flash_attn_fp8_gfx1201.py.
 # wsplit2: 成对展开 + K/V 双缓冲 LDS + 任意 S 的 P 掩码
 #
 # 相对 wsplit(c656b12) 的三个结构变化：

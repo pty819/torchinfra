@@ -1,3 +1,4 @@
+# ARCHIVED: warp-split v1 experiment; production uses flash_attn_fp8_gfx1201.py.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 torchinfra — FA2 式组内 KV 分治（warp split）实验 kernel。
 #

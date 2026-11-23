@@ -1,3 +1,4 @@
+# REFERENCE ONLY: BF16 baseline; production FP8 uses flash_attn_fp8_gfx1201.py.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors.
 #

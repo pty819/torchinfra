@@ -5,7 +5,7 @@
 import torch
 import torch.nn.functional as F
 
-from flydsl_kernels import flydsl_flash_attn
+from flydsl_kernels.wrapper import flydsl_flash_attn
 
 
 def bench(fn, iters=20, warmup=5):

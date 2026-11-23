@@ -1,8 +1,7 @@
 # torchinfra/flydsl_kernels — vendored aiter FlyDSL kernels for gfx1201.
 #
-# Prereqs: flydsl>=0.4.1.dev993 wheel (installed via tuna mirror).
-# The wheel lacks flydsl.expr.buffer_ops (post-dev993 API); flydsl_compat
-# injects a vendored copy before the kernel modules are imported.
+# Requires flydsl 0.4.1. flydsl_compat injects the vendored buffer_ops and
+# bridges the MLIR 23/24 syntax before any kernel module is imported.
 #
 # flydsl's own arch detection falls back to gfx942 when rocm_agent_enumerator
 # is absent — pin the arch explicitly.
@@ -26,5 +25,6 @@ if os.path.isdir(os.path.join(_sdk_devel, "lib", "llvm", "bin")):
     os.environ.setdefault("FLYDSL_COMPILE_LLVM_DIR", os.path.join(_sdk_devel, "lib", "llvm"))
 
 from . import flydsl_compat  # noqa: F401,E402  (must run before kernel import)
-from .flash_attn_func_gfx1201 import build_flash_attn_func_module  # noqa: E402,F401
-from .wrapper import flydsl_flash_attn  # noqa: E402,F401
+
+# The production FP8 path imports flash_attn_fp8_gfx1201 / fp8_wrapper
+# directly. The BF16 baseline in wrapper.py stays out of this import path.
