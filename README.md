@@ -83,7 +83,11 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
 
 - **VAE dec 剩余 3.8s CPU dispatch 间隙**（与换页无关，worker 大图 20 万次
   dispatch 慢、小图正常之谜；子进程/compile 方案待做）
-- **CUDA Graphs**：预计端到端 ~10s
+- **CUDA Graphs/HIP Graphs**（整段 kernel 录制+一键重放，消 CPU 发射开销）：
+  11-20 时代估计 ~10s（当时 wall 68s vs GPU 57.7s 有 10.3s 间隙）；2026-11-23
+  实测热路径 wall 76.8 vs GPU 76.5，采样段间隙已 <1s，剩余价值主要在 VAE
+  dec 的 3.8s CPU dispatch 间隙。capture 需静态地址/形状，flydsl+hipBLASLt
+  裸调需逐个验证兼容性
 - **少步蒸馏 LoRA**（6-step）：67→~20s 的最大单项杠杆
 - **GPTQ**：已评估——激活误差主导时（现格局）权重侧补偿无感，暂不做
 - **"采样 2.06× 回归"系误报（2026-11-23 查明，非回归）**：逐新 prompt 测得
