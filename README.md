@@ -2,6 +2,8 @@
 
 PyTorch 之上的迷你 LLM 推理引擎与自定义算子学习栈（ROCm / Radeon RX 9070 GRE）。
 
+当前 kernel 只针对 gfx1201（RDNA4，实测 RX 9070 GRE）；其他 AMD 架构未验证。
+
 设计文档见 [docs/superpowers/specs/2026-10-19-torchinfra-design.md](docs/superpowers/specs/2026-10-19-torchinfra-design.md)，
 路线：P0 编译链路 → P1 纯 PyTorch 推理引擎 → P2 自定义算子 → P3 paged KV + continuous batching。
 
@@ -13,22 +15,41 @@ PyTorch 之上的迷你 LLM 推理引擎与自定义算子学习栈（ROCm / Rad
 
 ## 安装
 
+需要 Python 3.14.x（ROCm wheels 是 cp314）和 [uv](https://docs.astral.sh/uv/)。
+宿主机需先装好 AMD GPU 驱动，当前用户要能访问 `/dev/kfd` 和 `/dev/dri`；
+JIT 扩展构建还需要可用的 C++ 编译器（`g++` 或 `clang++`），`ninja` 由 `uv sync`
+一并安装。
+
 ```bash
 uv sync --all-packages --all-extras
-uv run qwen21dit-serve
-uv run qwen21dit-web
+.venv/bin/rocm-sdk init   # 首次安装/重建 .venv 后必须执行一次
+uv run qwen21dit-serve    # worker，终端 1，默认 127.0.0.1:7861
+uv run qwen21dit-web      # 面板，终端 2，默认 Tailscale IP；无 tailscale 时 0.0.0.0:7860
 uv run nemotron-serving --help
 ```
 
 `pyproject.toml` 只声明 `>=` 下限；`uv.lock` 记录实际验证过的 ROCm 10.2 wheels、
-PyTorch 2.15、Triton 3.9 和 FlyDSL 0.4.1。ROCm 用户态来自 pip，另需宿主机的
-AMD GPU 驱动。首次安装后若 JIT 扩展报错，在 `.venv` 内执行一次 `rocm-sdk init`。
+PyTorch 2.15、Triton 3.9 和 FlyDSL 0.4.1。ROCm 用户态来自 pip，宿主机的
+AMD GPU 驱动不由 pip 提供。
+
+`.venv/bin/rocm-sdk init` 不是可选项：ROCm devel payload 是惰性展开的，
+`uv sync` 只解包 wheel；不执行 init 时 JIT 扩展会报 `lld invocation failed` 或
+`thrust/complex.h file not found`。每次重建 `.venv` 或重装 `rocm` 包后都要重新
+执行（命令可重复运行）。装完可自检：
+
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0))"
+```
+
+`qwen21dit-web` 默认绑定 Tailscale IPv4（找不到 `tailscale` 时退化为
+`0.0.0.0:7860`），且无鉴权；`nemotron-serving` 默认只监听 `127.0.0.1:8000`，
+但加 `--host 0.0.0.0` 后同样无鉴权。暴露到局域网或公网前请自行加认证和防火墙规则。
 
 ### 依赖
 
 | 层 | 依赖 |
 | --- | --- |
-| `torchinfra` 核心 | ROCm 10.2 pip 用户态（core/libraries/devel）、PyTorch 2.15.0+rocm10.2.0、Triton 3.9、FlyDSL 0.4.1、`amd-torch-device-gfx1201`（kpack）、`amd-torch-device-gfx12-0`（AOTriton SDPA images）、safetensors、NumPy |
+| `torchinfra` 核心 | ROCm 10.2 pip 用户态（core/libraries/devel）、PyTorch 2.15.0+rocm10.2.0、Triton 3.9、FlyDSL 0.4.1、`amd-torch-device-gfx1201`（kpack）、`amd-torch-device-gfx12-0`（AOTriton SDPA images）、ninja、safetensors、NumPy |
 | `qwen21dit` | Transformers 5.12、Diffusers 0.43、Pillow、Gradio（`web` extra） |
 | `nemotron-serving` | Transformers 5.12、safetensors |
 | 宿主 | AMD GPU 驱动（不由 pip 提供） |
@@ -41,12 +62,25 @@ FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
 `llvm.mlir.constant` 的 `index`/`i64` 属性写法上不一致；`flydsl_kernels/flydsl_compat.py`
 在外部 codegen 文本上做兼容重写，gfx1201 FP8 attention 已重新编译并对拍。
 
+### 模型权重
+
+仓库不附带模型权重。`qwen21dit` 默认从 `QDIT_MODEL_DIR`（`~/models/qwen21`）
+读取 DiT、VAE、文本编码器和 LoRA，文件清单与 Hugging Face 来源见
+[applications/qwen21dit/README.md](applications/qwen21dit/README.md)。`nemotron-serving`
+用 `--model` 指向本地 Jina 或 Nemotron FP8 目录，见
+[applications/nemotron-serving/README.md](applications/nemotron-serving/README.md)。
+仓库代码目前未附 `LICENSE`（默认保留所有权利）；权重和 LoRA 遵循各自上游研究
+许可（部分非商用）。
+
 ## 环境（P0 踩坑结论，换机器/重建 venv 必读）
 
-- venv：迁移前为 `~/rocm10`（Python 3.14.7）；当前用 `uv sync` 创建 `.venv`，版本以 `uv.lock` 为准（ROCm 10.2 / torch 2.15 / triton 3.9）
-- **必须先执行一次 `.venv/bin/rocm-sdk init`**：展开 devel payload（thrust、hipblas
-  等头文件）并把 device 文件链接进 devel 树。未展开时 JIT 扩展编译会报
-  `thrust/complex.h file not found`；展开前 torch 把 ROCM_HOME 解析到
+- Python：需要 3.14.x（ROCm wheels 是 cp314；根 `pyproject.toml` 限制
+  `>=3.14,<3.15`）。`uv sync` 创建 `.venv`，版本以 `uv.lock` 为准
+  （ROCm 10.2 / torch 2.15 / triton 3.9）
+- **重建 `.venv` 或重装 `rocm` 包后都要执行 `.venv/bin/rocm-sdk init`**：
+  展开 devel payload（thrust、hipblas 等头文件）并把 device 文件链接进 devel 树。
+  未展开时 JIT 扩展编译会报 `thrust/complex.h file not found` 或
+  `lld invocation failed`；展开前 torch 把 ROCM_HOME 解析到
   `_rocm_sdk_core`，展开后正确解析到 `_rocm_sdk_devel`
 - **SDPA 需要 `amd-torch-device-gfx12-0`**：它把
   `torch/lib/aotriton.images/amd-gfx120x/` 装进 torch。缺这个包时 flash/efficient
@@ -66,23 +100,26 @@ FlyDSL 0.4.1 生成的 MLIR 24 IR 与 ROCm 10.2 自带的 MLIR 23 在
 （仓库路径含中文 + ninja 错误输出解码的 bug）。看真实错误的方法：
 
 ```bash
-cd ~/.cache/torch_extensions/py314_rocm71626385/torchinfra_kernels
+cd ~/.cache/torch_extensions/*/torchinfra_kernels
 ninja            # 原始错误直接可见
 ```
 
 ## 运行测试
 
 ```bash
-uv sync --all-packages --all-extras
+# 应用层 CPU 回归
 cd applications/qwen21dit && uv run pytest -m "not gpu"
-for t in tests/test_*.py; do .venv/bin/python "$t"; done   # 部分测试需要 GPU/模型
+cd ../nemotron-serving && uv run pytest -m "not gpu"
 ```
+
+GPU 对拍：在对应 app 目录执行 `uv run pytest -m gpu`（需要本地模型权重）。
+根目录 `tests/` 是引擎和历史实验测试，多数需要 GPU 与本地 Qwen3-0.6B 权重，
+不作为快速回归。
 
 ## 对话
 
 ```bash
-cd torchinfra
-PYTHONPATH=. ~/rocm10/bin/python -m torchinfra.chat   # 默认 Qwen3-0.6B bf16
+uv run python -m torchinfra.chat   # 需要 ~/models/Qwen3-0.6B
 ```
 
 参数：`--max-new/--temperature/--top-p/--seed`。实测 decode 约 14 tok/s（bf16，9070 GRE）。

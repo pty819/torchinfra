@@ -25,10 +25,14 @@ AMD Radeon RX 9070 GRE (gfx1201) / Ryzen 7 9700X。DiT 直接加载 fp8 权重�
 ```bash
 # 在 torchinfra 仓库根目录
 uv sync --all-packages --all-extras
+.venv/bin/rocm-sdk init       # 首次安装/重建 .venv 后必须执行
 uv run qwen21dit-serve        # 默认: W8A8 蝶形合并版
 # QDIT_ENC=sqrot uv run qwen21dit-serve  # 退回 GPU 旋转版 (长 prompt b≥500 时编码更快)
-uv run qwen21dit-web         # web 面板 :7860
+uv run qwen21dit-web         # web 面板 :7860，默认绑定 Tailscale IP / 0.0.0.0
 ```
+
+ROCm devel payload 是惰性展开的；不执行 `rocm-sdk init` 时 JIT 会报
+`lld invocation failed` 或 `thrust/complex.h file not found`。
 
 ## 目录
 
