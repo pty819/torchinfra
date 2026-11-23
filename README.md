@@ -53,6 +53,13 @@ python3 tools/qwen_web_app_minimal.py                 # web 面板 :7860
      cos 提升 + 编码与 GPU 采样可并行。权重: int8_qwen3vl8b_sqrot2.safetensors
 5. **er_sde 采样器**（sdcpp 忠实移植）：质量项。
 6. **fp8 权重上挂 LoRA**：bf16 旁路不触碰 fp8 qdata。
+7. **DiT 动态编译（2026-11-23，8dfc9db）**：消除"每个新 prompt 长度首图
+   +30~70s"重编译税。三件套缺一不可：`prefix_len` 从入参 int（dynamo 按值
+   特化）改为模型内 `ctx.shape[1]` 推导；rope 构建移出编译区（`_pe` dict
+   缓存 key 含 LT 也会特化）；`compile(dynamic=True)`。实测热路径 76.8s =
+   静态 76.5s 零掉速，任意新长度 76.8-77.0s 免编译；裸 dynamic=True 不够
+   （int 特化仍在，新长度照旧 153s）。代价：worker 重启后前 1-2 图各付 ~50s
+   编译（inductor 磁盘缓存可摊薄）。零第三方库改动。
 
 ### 定案无效的（负结果存档）
 
